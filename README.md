@@ -36,8 +36,10 @@
 | `internal/pinyin` | 拼音切分、声韵母识别、DP 最优切分 | AC 自动机 + DP |
 | `internal/dict` | 词典加载与前缀检索 | `go:embed` + Trie |
 | `internal/fuzzy` | 模糊音、邻键容错、编辑距离 | 规则引擎 + BK-Tree 思路 |
+| `internal/segmenter` | **整句切分**（DP + 词频概率） | 动态规划 + 对数概率 |
 | `internal/engine` | 核心引擎，组合各模块 | 综合打分排序 |
 | `internal/ibus` | IBus 适配器 | D-Bus（待完善）+ stdin 测试 |
+| `internal/winime` | Windows TSF 适配层（骨架） | 命名管道 + TSF proxy（计划中） |
 | `cmd/ime-cli` | CLI 测试入口 | 4 种模式 |
 
 ## 容错能力（三层模型）
@@ -70,17 +72,19 @@
 | 扩展词库 | Rime / THUOCL | 任意 | 运行时加载 |
 | 用户词典 | 用户输入历史 | 动态 | 内存中（MVP）/ BadgerDB（待实现） |
 
-## 性能指标（Linux 容器实测）
+## 性能指标（Linux 容器 + Windows 实测）
 
-| 指标 | 数值 | 备注 |
-|------|------|------|
-| 词典加载时间 | 244ms | 13.6w 词条 |
-| 短输入查询（2 音节） | 60µs | 远低于 16ms 阈值 |
-| 长输入查询（4+ 音节） | 571µs | 仍 < 1ms |
-| 模糊音查询 | 145µs | 含笛卡尔积展开 |
-| QPS | 3669 | 2000 次混合查询平均 |
-| 16ms 延迟达标率 | 100% | 1000 次查询 0 次超时 |
-| 二进制大小 | 5.4MB | 静态编译，无外部依赖 |
+| 指标 | Linux | Windows | 备注 |
+|------|-------|---------|------|
+| 词典加载时间 | 224ms | 746ms | Windows 文件 I/O 较慢 |
+| 短输入查询（2 音节） | 60µs | 157µs | 远低于 16ms 阈值 |
+| 长输入查询（4+ 音节） | 571µs | 1516µs | 仍 < 2ms |
+| 模糊音查询 | 145µs | 391µs | 含笛卡尔积展开 |
+| QPS | 3669 | 1968 | Windows 主机为老 i5 |
+| 16ms 延迟达标率 | 100% | 100% | 1000 次查询 0 次超时 |
+| 二进制大小 | 5.3MB | 6.0MB | 静态编译，无外部依赖 |
+
+**Windows 测试主机**：Intel Core i5-4258U @ 2.40GHz, Windows 11 (10.0.22621)
 
 ## 测试覆盖
 
@@ -89,7 +93,8 @@
 | 单元测试 - pinyin | 4 | ✅ |
 | 单元测试 - dict | 5 | ✅ |
 | 单元测试 - fuzzy | 6 | ✅ |
-| 单元测试 - engine | 6 | ✅ |
+| 单元测试 - segmenter | 5 | ✅ |
+| 单元测试 - engine | 8 | ✅ |
 | 集成测试 - E2E | 9 | ✅ |
 | 性能基准 | 4 | ✅ |
 
@@ -101,6 +106,8 @@
 | `zhongguo` | 中国 | 精确匹配 |
 | `shurufa` | 输入法 | 精确匹配 |
 | `rengongzhineng` | 人工智能 | 长词匹配 |
+| `woaixuexi` | **我爱学习** | **整句切分** |
+| `zhongguoren` | **中国人** | **整句切分** |
 | `lihao` | 厉害 (Top3 含你好) | n/l 模糊音 |
 | `zongguo` | 中国 | zh/z 模糊音 |
 | `nigao` | 你好 | h/g 邻键容错 |
@@ -131,7 +138,7 @@ go build -o bin/ime-cli ./cmd/ime-cli
 ### 批处理模式（适合脚本化测试）
 ```bash
 printf "nihao\nzhongguo\nshurufa\n" | ./bin/ime-cli -mode=batch
-# 输出: nihao	你好 极好 记号 利好 泥淖 ...
+# 输出: nihao     你好 极好 记号 利好 泥淖 ...
 ```
 
 ### 性能压测
@@ -143,6 +150,21 @@ printf "nihao\nzhongguo\nshurufa\n" | ./bin/ime-cli -mode=batch
 ```bash
 ./bin/ime-cli -dict /path/to/extra.txt
 # 格式：每行 `汉字 拼音 词频`
+```
+
+### 交叉编译（Linux 上为三大平台构建）
+```bash
+bash scripts/cross_build.sh
+# 产物：
+# bin/samime-linux-amd64
+# bin/samime-windows-amd64.exe
+# bin/samime-darwin-amd64
+# bin/samime-darwin-arm64
+```
+
+### Windows 上测试
+```cmd
+scripts\test_win.bat
 ```
 
 ### 全流程测试
@@ -159,11 +181,14 @@ bash scripts/test_all.sh
 - [x] 候选排序
 - [x] 用户词典（内存）
 - [x] CLI 全流程测试
+- [x] **整句切分（DP + 词频对数概率）**
+- [x] **Windows 上验证（Win11 实测）**
+- [x] **跨平台交叉编译（Linux/Windows/macOS）**
 
 ### Phase 2（计划中）
-- [ ] 整句切分（当前仅整词匹配，长句无法组合）
 - [ ] 2-gram 语言模型（提升排序质量）
 - [ ] 用户词典持久化（BadgerDB）
+- [ ] Windows TSF 完整适配（C++ 薄壳 + 命名管道）
 - [ ] IBus D-Bus 完整适配
 - [ ] Fcitx5 适配
 

@@ -10,6 +10,7 @@ import (
         "github.com/zai/goime/internal/dict"
         "github.com/zai/goime/internal/fuzzy"
         "github.com/zai/goime/internal/pinyin"
+        "github.com/zai/goime/internal/segmenter"
 )
 
 // Candidate 候选词
@@ -22,20 +23,21 @@ type Candidate struct {
 
 // Engine 输入法引擎
 type Engine struct {
-        dict  *dict.Dict
-        fuzzy *fuzzy.Engine
+        dict       *dict.Dict
+        fuzzy      *fuzzy.Engine
+        segmenter  *segmenter.Segmenter
 
-        mu           sync.RWMutex
-        userFreq     map[string]float64 // key: word|pinyin, val: 频次
+        mu            sync.RWMutex
+        userFreq      map[string]float64 // key: word|pinyin, val: 频次
         commitHistory []string           // 最近提交的词（用于上下文）
 
         // 排序权重
-        wPinyinMatch float64 // 拼音完全匹配权重
-        wFreq        float64 // 词频权重
-        wUserFreq    float64 // 用户频次权重
-        wContext     float64 // 上下文权重
-        wFuzzy       float64 // 模糊音匹配折扣
-        wTypo        float64 // 拼写错误匹配折扣
+        wPinyinMatch float64
+        wFreq        float64
+        wUserFreq    float64
+        wContext     float64
+        wFuzzy       float64
+        wTypo        float64
 }
 
 // Config 引擎配置
@@ -65,6 +67,7 @@ func New(d *dict.Dict, cfg Config) *Engine {
         return &Engine{
                 dict:         d,
                 fuzzy:        fuzzy.New(),
+                segmenter:    segmenter.New(d),
                 userFreq:     make(map[string]float64),
                 wPinyinMatch: cfg.WPinyinMatch,
                 wFreq:        cfg.WFreq,
@@ -108,6 +111,11 @@ func (e *Engine) Search(input string) []Candidate {
 
         // 1. 精确匹配
         e.exactMatch(syls, candMap)
+
+        // 1.5 整句切分匹配（多音节时启用）
+        if len(syls) >= 2 {
+                e.segmentMatch(syls, candMap)
+        }
 
         // 2. 模糊音匹配
         e.fuzzyMatch(syls, candMap)
@@ -171,6 +179,53 @@ func (e *Engine) exactMatch(syls []pinyin.Syllable, out map[string]*Candidate) {
                                         }
                                 }
                         }
+                }
+        }
+}
+
+// segmentMatch 整句切分匹配
+// 用动态规划找出最优词组合，作为候选
+func (e *Engine) segmentMatch(syls []pinyin.Syllable, out map[string]*Candidate) {
+        joined := pinyin.Join(syls)
+        // 已经被 exactMatch 命中的整词，跳过
+        if entries := e.dict.Lookup(joined); len(entries) > 0 {
+                return
+        }
+        words, pinyins, score := e.segmenter.Segment(joined)
+        if len(words) <= 1 {
+                return // 切分失败或单字
+        }
+        // 组合所有非空词
+        var combined strings.Builder
+        var combinedPy strings.Builder
+        allFound := true
+        for i, w := range words {
+                if w == "" {
+                        allFound = false
+                        break
+                }
+                combined.WriteString(w)
+                combinedPy.WriteString(pinyins[i])
+        }
+        if !allFound || combined.Len() == 0 {
+                return
+        }
+        word := combined.String()
+        py := combinedPy.String()
+        key := word + "|" + py
+        if _, ok := out[key]; !ok {
+                // 切分组合分数：基于切分的对数概率转换
+                // score 是负数（log prob），越接近 0 越好
+                // 转换为正向得分：用 max(0, 100 + score * 5) 作为基础
+                baseScore := e.wPinyinMatch * 0.7 // 切分组合略低于整词
+                if score < -20 {
+                        baseScore *= 0.5 // 切分质量差时降权
+                }
+                out[key] = &Candidate{
+                        Word:   word,
+                        Pinyin: py,
+                        Score:  baseScore,
+                        Source: "segment",
                 }
         }
 }
