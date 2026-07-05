@@ -443,47 +443,145 @@ func (ie *IBusEngine) commitCandidate(idx int) bool {
         return true
 }
 
+// makeIBusText 把字符串包装成 IBusText 的 D-Bus 表示。
+//
+// IBusText 在 D-Bus 上的签名是 (sa{sv}sv) —— 一个结构体，含：
+//   - text (s): 文本本身
+//   - attrs (a{sv}): 属性表（可空）
+//   - cursor_pos (s): 旧字段，IBus 实际忽略
+//   - surrounding_text (v): 周围文本（可空）
+//
+// 实测 godbus 里用结构体 + variant 包装能被 ibus-daemon 正确解析。
+func makeIBusText(text string) interface{} {
+	return struct {
+		Text      string
+		Attrs     []map[string]dbus.Variant
+		CursorPos string
+		Surround  dbus.Variant
+	}{
+		Text:      text,
+		Attrs:     []map[string]dbus.Variant{},
+		CursorPos: "",
+		Surround:  dbus.MakeVariant(""),
+	}
+}
+
+// makeIBusTextVariant 返回包装在 variant 里的 IBusText（信号参数期望 v 签名）。
+func makeIBusTextVariant(text string) dbus.Variant {
+	return dbus.MakeVariant(makeIBusText(text))
+}
+
 func (ie *IBusEngine) commitText(text string) {
-        // 通过 D-Bus 信号通知 IBus 提交文字
-        // 实际需要发 "CommitText" 信号
-        if ie.conn == nil {
-                return
-        }
-        ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.CommitText", text)
+	// 通过 D-Bus 信号通知 IBus 提交文字。
+	// CommitText 信号签名: (v) —— 一个 IBusText variant。
+	if ie.conn == nil {
+		return
+	}
+	ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.CommitText",
+		makeIBusTextVariant(text))
 }
 
 func (ie *IBusEngine) reset() {
-        ie.preedit = ""
-        ie.cands = nil
-        ie.cursorPos = 0
-        ie.engine.ResetContext()
-        ie.emitSignals()
+	ie.preedit = ""
+	ie.cands = nil
+	ie.cursorPos = 0
+	ie.engine.ResetContext()
+	ie.emitSignals()
 }
 
 func (ie *IBusEngine) emitSignals() {
-        if ie.conn == nil {
-                return
-        }
-        // UpdatePreeditText 信号
-        ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.UpdatePreeditText",
-                ie.preedit, uint32(len(ie.preedit)), true)
+	if ie.conn == nil {
+		return
+	}
 
-        // UpdateAuxiliaryText 信号（拼音提示）
-        ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.UpdateAuxiliaryText",
-                ie.preedit, true)
+	if ie.preedit == "" {
+		// 清空预编辑
+		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.HidePreeditText")
+	} else {
+		// UpdatePreeditText 信号签名: (vuu) —— IBusText variant, cursor_pos, visible
+		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.UpdatePreeditText",
+			makeIBusTextVariant(ie.preedit), uint32(len(ie.preedit)), true)
+	}
 
-        // UpdateLookupTable 信号（候选词）
-        if len(ie.cands) > 0 {
-                // 转换为 IBus LookupTable 格式
-                words := make([]string, len(ie.cands))
-                for i, c := range ie.cands {
-                        words[i] = c.Word
-                }
-                ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.UpdateLookupTable",
-                        words, true)
-        } else {
-                ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.HideLookupTable")
-        }
+	// UpdateAuxiliaryText 信号签名: (vb) —— IBusText variant, visible
+	if ie.preedit == "" {
+		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.HideAuxiliaryText")
+	} else {
+		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.UpdateAuxiliaryText",
+			makeIBusTextVariant(ie.preedit), true)
+	}
+
+	// UpdateLookupTable 信号签名: (vb) —— IBusLookupTable variant, visible
+	if len(ie.cands) > 0 {
+		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.UpdateLookupTable",
+			makeLookupTableVariant(ie.cands), true)
+		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.ShowLookupTable")
+	} else {
+		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.HideLookupTable")
+	}
+}
+
+// makeLookupTableVariant 构造 IBusLookupTable 的 variant。
+//
+// IBusLookupTable D-Bus 签名: (uuiuusa{sv}av)
+// 简化为最小可用结构。
+func makeLookupTableVariant(cands []engine.Candidate) dbus.Variant {
+	type ibusText struct {
+		Text      string
+		Attrs     []map[string]dbus.Variant
+		CursorPos string
+		Surround  dbus.Variant
+	}
+	type lookupTable struct {
+		PageSize      uint32
+		CursorPos     uint32
+		CursorVisible int32
+		RoundInCursor uint32
+		Orientation   uint32
+		Candidates    []ibusText
+		Labels        []ibusText
+		Properties    []map[string]dbus.Variant
+	}
+
+	n := uint32(len(cands))
+	if n > 9 {
+		n = 9
+	}
+	if n == 0 {
+		n = 1
+	}
+
+	candTexts := make([]ibusText, 0, len(cands))
+	for _, c := range cands {
+		candTexts = append(candTexts, ibusText{
+			Text:      c.Word,
+			Attrs:     []map[string]dbus.Variant{},
+			CursorPos: "",
+			Surround:  dbus.MakeVariant(""),
+		})
+	}
+
+	labels := make([]ibusText, 0, n)
+	for i := uint32(0); i < n; i++ {
+		labels = append(labels, ibusText{
+			Text:      string(rune('1' + i)),
+			Attrs:     []map[string]dbus.Variant{},
+			CursorPos: "",
+			Surround:  dbus.MakeVariant(""),
+		})
+	}
+
+	tbl := lookupTable{
+		PageSize:      9,
+		CursorPos:     0,
+		CursorVisible: 1,
+		RoundInCursor: 0,
+		Orientation:   1,
+		Candidates:    candTexts,
+		Labels:        labels,
+		Properties:    []map[string]dbus.Variant{},
+	}
+	return dbus.MakeVariant(tbl)
 }
 
 // Stop 停止
