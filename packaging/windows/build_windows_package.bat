@@ -64,10 +64,18 @@ echo MIT License > %STAGE%\LICENSE.txt
 
 echo.
 echo [5/5] 用 NSIS 生成安装包...
-where makensis >nul 2>nul
-if %ERRORLEVEL% == 0 (
+set MAKENSIS=
+where makensis >nul 2>nul && set MAKENSIS=makensis
+if not defined MAKENSIS (
+    if exist "C:\Program Files (x86)\NSIS\makensis.exe" set MAKENSIS="C:\Program Files (x86)\NSIS\makensis.exe"
+)
+if not defined MAKENSIS (
+    if exist "C:\Program Files\NSIS\makensis.exe" set MAKENSIS="C:\Program Files\NSIS\makensis.exe"
+)
+
+if defined MAKENSIS (
     pushd packaging\windows
-    makensis samime_installer.nsi
+    %MAKENSIS% samime_installer.nsi
     if exist samime-setup-%VERSION%.exe (
         echo.
         echo ==================================================

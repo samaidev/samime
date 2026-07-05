@@ -38,14 +38,15 @@ VIAddVersionKey "LegalCopyright" "MIT License"
 !include "x64.nsh"
 
 !define MUI_ABORTWARNING
-!define MUI_ICON "samime.ico"
-!define MUI_UNICON "samime.ico"
-!define MUI_WELCOMEFINISHPAGE_BITMAP "samime-banner.bmp"
+; 图标和 banner 可选（如果存在则使用，不存在用默认）
+; !define MUI_ICON "samime.ico"
+; !define MUI_UNICON "samime.ico"
+; !define MUI_WELCOMEFINISHPAGE_BITMAP "samime-banner.bmp"
 
 ; Welcome page
 !insertmacro MUI_PAGE_WELCOME
 ; License page
-!insertmacro MUI_PAGE_LICENSE "LICENSE.txt"
+!insertmacro MUI_PAGE_LICENSE "stage\LICENSE.txt"
 ; Components page
 !insertmacro MUI_PAGE_COMPONENTS
 ; Directory page
@@ -78,10 +79,10 @@ Section "Samime 核心引擎" SecCore
     SectionIn RO  ; 必选
     SetOutPath "$INSTDIR"
 
-    ; 主程序
-    File "samime.exe"
-    File "README.txt"
-    File "LICENSE.txt"
+    ; 主程序（从 stage 目录读）
+    File "stage\samime.exe"
+    File "stage\README.txt"
+    File "stage\LICENSE.txt"
 
     ; 写注册表
     WriteRegStr HKLM "${APP_REGKEY}" "InstallDir" "$INSTDIR"
@@ -108,7 +109,7 @@ SectionEnd
 
 Section "TSF 输入法集成" SecTSF
     SetOutPath "$INSTDIR"
-    File "samime_tsf.dll"
+    File "stage\samime_tsf.dll"
 
     ; 注册 TSF 服务
     ExecWait 'regsvr32 /s "$INSTDIR\samime_tsf.dll"'
