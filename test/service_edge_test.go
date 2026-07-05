@@ -129,7 +129,7 @@ func sendRaw(addr, line string) (string, error) {
                 return "", err
         }
         defer conn.Close()
-        conn.SetDeadline(time.Now().Add(5 * time.Second))
+        conn.SetDeadline(time.Now().Add(30 * time.Second))  // 长超时，避免 Windows 上慢查询
         if _, err := conn.Write([]byte(line)); err != nil {
                 return "", err
         }
