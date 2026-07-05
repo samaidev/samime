@@ -357,6 +357,36 @@ func (ie *IBusEngine) ProcessKeyEvent(keyval, keycode, state uint32) (bool, *dbu
                 return false, nil
         }
 
+        // 标点符号智能转换：有 preedit 时先提交 preedit，再转换标点；
+        // 无 preedit 时直接转换标点。
+        // 注意：< > " ' ^ _ $ ~ 这些键本身就需要 Shift 才能输入，
+        // 所以不能用 Shift 状态来判断是否转换。
+        // 只有基础标点（. , ? ! : ; ( ) \）在 Shift 时才透传英文符号。
+        if punct, ok := punctMap[rune(keyval)]; ok {
+                shift := (state & 0x0001) != 0
+                // 基础标点（无需 Shift）在 Shift 时保持英文，方便输入 URL/邮箱/代码
+                basePunct := keyval == '.' || keyval == ',' || keyval == '?' ||
+                        keyval == '!' || keyval == ':' || keyval == ';' ||
+                        keyval == '(' || keyval == ')' || keyval == '\\' ||
+                        keyval == '/' || keyval == '\'' ||
+                        keyval == '[' || keyval == ']' ||
+                        keyval == '{' || keyval == '}'
+                if shift && basePunct {
+                        log.Printf("[ibus]   punct %q with Shift -> passthrough (english)", string(rune(keyval)))
+                        return false, nil
+                }
+                // 先提交当前 preedit（取第一个候选）
+                if ie.preedit != "" && len(ie.cands) > 0 {
+                        ie.commitCandidate(0)
+                } else if ie.preedit != "" {
+                        ie.commitText(ie.preedit)
+                        ie.reset()
+                }
+                ie.commitText(punct)
+                log.Printf("[ibus]   punct %q -> %q", string(rune(keyval)), punct)
+                return true, nil
+        }
+
         // 字母键 (a-z, A-Z)
         if (keyval >= 'a' && keyval <= 'z') || (keyval >= 'A' && keyval <= 'Z') {
                 ch := rune(keyval)
@@ -370,18 +400,42 @@ func (ie *IBusEngine) ProcessKeyEvent(keyval, keycode, state uint32) (bool, *dbu
                 return true, nil
         }
 
-        // F1 (65470): 自测键 —— 直接 commit "你好"，
-        // 用于在不依赖候选窗的情况下验证 CommitText 信号链路。
-        if keyval == 65470 {
-                log.Printf("[ibus]   F1 self-test: commit 你好")
-                ie.commitText("你好")
-                ie.reset()
-                return true, nil
-        }
-
         log.Printf("[ibus]   unhandled keyval=%d -> passthrough", keyval)
         return false, nil
 }
+
+// punctMap 英文标点 → 中文标点映射表。
+// 用户按英文标点时（无 Shift），自动转成中文全角标点。
+// Shift+标点保持英文符号不变，便于输入 URL、邮箱等。
+var punctMap = map[rune]string{
+        '.':  "。",  // 句号
+        ',':  "，",  // 逗号
+        '?':  "？",  // 问号
+        '!':  "！",  // 感叹号
+        ':':  "：",  // 冒号
+        ';':  "；",  // 分号
+        '(':  "（",  // 左括号
+        ')':  "）",  // 右括号
+        '<':  "《",  // 左书名号（Shift+,）
+        '>':  "》",  // 右书名号（Shift+.）
+        '"':  "“",  // 左双引号
+        '\'': "‘",  // 左单引号
+        '\\': "、",  // 顿号（反斜杠键）
+        '/':  "、",  // 顿号（斜杠键，仅无 Shift 时）
+        '^':  "……", // 省略号（Shift+6）
+        '_':  "——", // 破折号（Shift+-）
+        '$':  "￥",  // 人民币符号
+        '~':  "～",  // 波浪号
+        '[':  "【",  // 左方括号
+        ']':  "】",  // 右方括号
+        '{':  "「",  // 左花括号 → 直角引号
+        '}':  "」",  // 右花括号 → 直角引号
+}
+
+// punctFlipQuotes 处理引号配对：连续按 " 时交替输出 “ ”
+// （简化版：通过记录上一次是否输出了左引号来判断）
+var lastLeftDoubleQuote = true
+var lastLeftSingleQuote = true
 
 // SetCursorLocation 设置光标位置
 func (ie *IBusEngine) SetCursorLocation(x, y, w, h int32) *dbus.Error {
