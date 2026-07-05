@@ -99,6 +99,21 @@ func handleTestConn(conn net.Conn, eng *engine.Engine) {
                         s := eng.Dict().Stats()
                         writeTestResp(writer, true, "", nil,
                                 fmt.Sprintf("entries=%d pinyins=%d", s.TotalEntries, s.UniquePinyin))
+                case "clipboard-history":
+                        if eng.Clipboard() != nil {
+                                entries := eng.Clipboard().Recent(50)
+                                data, _ := json.Marshal(entries)
+                                writeTestResp(writer, true, "", nil, string(data))
+                        } else {
+                                writeTestResp(writer, false, "", nil, "clipboard not enabled")
+                        }
+                case "clipboard-clear":
+                        if eng.Clipboard() != nil {
+                                eng.Clipboard().Clear()
+                                writeTestResp(writer, true, "", nil, "")
+                        } else {
+                                writeTestResp(writer, false, "", nil, "clipboard not enabled")
+                        }
                 case "shutdown":
                         writeTestResp(writer, true, "", nil, "")
                         return
