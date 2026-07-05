@@ -108,11 +108,14 @@ SectionEnd
 
 Section "TSF Input Method Integration" SecTSF
     SetOutPath "$INSTDIR"
-    File "stage\samime_tsf.dll"
+    ; /nonfatal: if DLL not built, skip silently
+    File /nonfatal "stage\samime_tsf.dll"
 
-    ; Register TSF service
-    ExecWait 'regsvr32 /s "$INSTDIR\samime_tsf.dll"'
-    DetailPrint "Registered TSF input method service"
+    ; Only register if DLL exists
+    IfFileExists "$INSTDIR\samime_tsf.dll" 0 +3
+        ExecWait 'regsvr32 /s "$INSTDIR\samime_tsf.dll"'
+        DetailPrint "Registered TSF input method service"
+    DetailPrint "TSF DLL not found, skipping registration"
 SectionEnd
 
 Section "Start on Boot" SecAutoStart
