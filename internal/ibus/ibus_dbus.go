@@ -775,6 +775,9 @@ func (ie *IBusEngine) emitSignals() {
 		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.HidePreeditText")
 	} else {
 		// UpdatePreeditText 信号签名: (vuu) —— IBusText variant, cursor_pos, visible
+		// 注意：GNOME Shell 把 preedit 和 auxiliary text 显示在同一区域，
+		// auxiliary 会覆盖 preedit。这里仍发 preedit（兼容某些 IBus 前端），
+		// 但实际显示靠下面的 auxiliary text（preedit + 候选词）。
 		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.UpdatePreeditText",
 			makeIBusTextVariant(ie.preedit), uint32(len(ie.preedit)), true)
 	}
@@ -782,14 +785,21 @@ func (ie *IBusEngine) emitSignals() {
 	// UpdateAuxiliaryText 信号签名: (vb) —— IBusText variant, visible
 	//
 	// GNOME Shell 的候选窗强制竖排，不遵循 LookupTable 的 orientation=1。
-	// 所以把候选词拼成横向字符串放到 auxiliary text 里显示，作为横向候选窗：
-	//   "1.看看 2.可靠 3.开口 4.可可 5.开阔"
+	// 所以把 "preedit | 候选词" 拼成横向字符串放到 auxiliary text 里显示：
+	//   "nihao | 1.你好 2.拟好 3.利好 4.理好 5.你要"
+	// 这样既能看到自己输入的英文字母（方便改错），又能横向看候选词。
 	// 数字键 1-5 仍通过 ProcessKeyEvent 处理选词，上下方向键仍通过
-	// CursorUp/CursorDown 展开/折叠/翻页（LookupTable 仍发送，仅用于导航）。
+	// CursorUp/CursorDown 展开/折叠/翻页。
 	if ie.preedit == "" || len(ie.cands) == 0 {
-		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.HideAuxiliaryText")
+		if ie.preedit == "" {
+			ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.HideAuxiliaryText")
+		} else {
+			// 有 preedit 但无候选，只显示 preedit
+			ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.UpdateAuxiliaryText",
+				makeIBusTextVariant(ie.preedit), true)
+		}
 	} else {
-		auxText := ie.buildHorizontalCandidates()
+		auxText := ie.preedit + " | " + ie.buildHorizontalCandidates()
 		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.UpdateAuxiliaryText",
 			makeIBusTextVariant(auxText), true)
 	}

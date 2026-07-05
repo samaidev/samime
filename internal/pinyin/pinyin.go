@@ -31,10 +31,24 @@ var finals = map[string]bool{
 // initialSet 用于快速判断
 var initialSet map[string]bool
 
+// syllableSet 预计算的所有合法音节集合，用于 O(1) 查找
+// 避免 IsValidSyllable 每次都遍历 initials（23次字符串比较）
+var syllableSet map[string]bool
+
 func init() {
         initialSet = make(map[string]bool, len(initials))
         for _, s := range initials {
                 initialSet[s] = true
+        }
+        // 预计算所有合法音节：声母+韵母 和 独立韵母
+        syllableSet = make(map[string]bool, 500)
+        for f := range finals {
+                syllableSet[f] = true // 独立韵母音节
+        }
+        for _, ini := range initials {
+                for f := range finals {
+                        syllableSet[ini+f] = true
+                }
         }
 }
 
@@ -72,6 +86,13 @@ func IsValidSyllable(s string) bool {
                 }
         }
         return false
+}
+
+// IsValidSyllableFast 快速判断是否为合法拼音音节（O(1) map 查找）
+// 输入必须已是小写。用预计算的 syllableSet 代替遍历 initials。
+// 用于高频调用场景（如 acronymIndex 构建）。
+func IsValidSyllableFast(s string) bool {
+        return syllableSet[s]
 }
 
 // Syllable 单个拼音音节
