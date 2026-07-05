@@ -29,25 +29,33 @@ LDFLAGS="-s -w -X main.version=$VERSION"
 echo ""
 echo "[1/5] 交叉编译所有平台二进制..."
 
-# Linux amd64
-echo "  - Linux amd64..."
-GOOS=linux GOARCH=amd64 go build -ldflags="$LDFLAGS" -o "$DIST/samime-linux-amd64" ./cmd/ime-cli
+# Linux amd64 (海光/兆芯/Intel/AMD)
+echo "  - Linux amd64 (x86_64)..."
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="$LDFLAGS" -o "$DIST/samime-linux-amd64" ./cmd/ime-cli
 
-# Linux arm64
-echo "  - Linux arm64..."
-GOOS=linux GOARCH=arm64 go build -ldflags="$LDFLAGS" -o "$DIST/samime-linux-arm64" ./cmd/ime-cli
+# Linux arm64 (飞腾/鲲鹏)
+echo "  - Linux arm64 (飞腾/鲲鹏)..."
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="$LDFLAGS" -o "$DIST/samime-linux-arm64" ./cmd/ime-cli
+
+# Linux loong64 (龙芯 3A5000+)
+echo "  - Linux loong64 (龙芯 LoongArch)..."
+CGO_ENABLED=0 GOOS=linux GOARCH=loong64 go build -ldflags="$LDFLAGS" -o "$DIST/samime-linux-loong64" ./cmd/ime-cli
+
+# Linux mips64le (龙芯旧架构)
+echo "  - Linux mips64le (龙芯旧架构)..."
+CGO_ENABLED=0 GOOS=linux GOARCH=mips64le go build -ldflags="$LDFLAGS" -o "$DIST/samime-linux-mips64le" ./cmd/ime-cli
 
 # Windows amd64
 echo "  - Windows amd64..."
-GOOS=windows GOARCH=amd64 go build -ldflags="$LDFLAGS" -o "$DIST/samime-windows-amd64.exe" ./cmd/ime-cli
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="$LDFLAGS" -o "$DIST/samime-windows-amd64.exe" ./cmd/ime-cli
 
 # macOS amd64
 echo "  - macOS amd64..."
-GOOS=darwin GOARCH=amd64 go build -ldflags="$LDFLAGS" -o "$DIST/samime-darwin-amd64" ./cmd/ime-cli
+CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags="$LDFLAGS" -o "$DIST/samime-darwin-amd64" ./cmd/ime-cli
 
 # macOS arm64 (Apple Silicon)
 echo "  - macOS arm64..."
-GOOS=darwin GOARCH=arm64 go build -ldflags="$LDFLAGS" -o "$DIST/samime-darwin-arm64" ./cmd/ime-cli
+CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags="$LDFLAGS" -o "$DIST/samime-darwin-arm64" ./cmd/ime-cli
 
 # 创建 macOS universal binary
 echo "  - macOS universal..."
@@ -64,17 +72,27 @@ Git Commit: $(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')
 Git Branch: $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'unknown')
 
 Files:
-  samime-linux-amd64       - Linux x86_64
-  samime-linux-arm64       - Linux ARM64
+  samime-linux-amd64       - Linux x86_64 (海光/兆芯/Intel/AMD)
+  samime-linux-arm64       - Linux ARM64 (飞腾/鲲鹏)
+  samime-linux-loong64     - Linux LoongArch (龙芯 3A5000+)
+  samime-linux-mips64le    - Linux MIPS (龙芯旧架构)
   samime-windows-amd64.exe - Windows x86_64
   samime-darwin-amd64      - macOS Intel
   samime-darwin-arm64      - macOS Apple Silicon
   samime-darwin-universal  - macOS Universal (Intel + ARM)
 
+国产平台支持:
+  银河麒麟 Kylin OS  - IBus
+  统信 UOS           - Fcitx5
+  深度 Deepin        - Fcitx5
+  欧拉 openEuler     - IBus/Fcitx5
+  龙蜥 Anolis OS     - IBus/Fcitx5
+
 Installation:
   Windows: 运行 packaging/windows/build_windows_package.bat (需要 NSIS)
   macOS:   运行 packaging/macos/build_macos_package.sh
   Linux:   运行 packaging/linux/build_linux_package.sh
+  国产平台: 参见 packaging/DOMESTIC_PLATFORMS.md
 EOF
 
 echo ""
@@ -90,13 +108,28 @@ cat > "$DIST/RELEASE_NOTES.md" <<EOF
 
 ## 下载
 
-| 平台 | 文件 | 大小 |
-|------|------|------|
-| Linux x86_64 | samime-linux-amd64 | $(du -h "$DIST/samime-linux-amd64" | cut -f1) |
-| Linux ARM64 | samime-linux-arm64 | $(du -h "$DIST/samime-linux-arm64" | cut -f1) |
-| Windows x86_64 | samime-windows-amd64.exe | $(du -h "$DIST/samime-windows-amd64.exe" | cut -f1) |
-| macOS Intel | samime-darwin-amd64 | $(du -h "$DIST/samime-darwin-amd64" | cut -f1) |
-| macOS Apple Silicon | samime-darwin-arm64 | $(du -h "$DIST/samime-darwin-arm64" | cut -f1) |
+| 平台 | 文件 | 大小 | 适用 |
+|------|------|------|------|
+| Linux x86_64 | samime-linux-amd64 | $(du -h "$DIST/samime-linux-amd64" | cut -f1) | Intel/AMD/海光/兆芯 |
+| Linux ARM64 | samime-linux-arm64 | $(du -h "$DIST/samime-linux-arm64" | cut -f1) | 飞腾/鲲鹏 |
+| Linux LoongArch | samime-linux-loong64 | $(du -h "$DIST/samime-linux-loong64" 2>/dev/null | cut -f1 || echo 'N/A') | 龙芯 3A5000+ |
+| Linux MIPS | samime-linux-mips64le | $(du -h "$DIST/samime-linux-mips64le" 2>/dev/null | cut -f1 || echo 'N/A') | 龙芯旧架构 |
+| Windows x86_64 | samime-windows-amd64.exe | $(du -h "$DIST/samime-windows-amd64.exe" | cut -f1) | Windows 10/11 |
+| macOS Intel | samime-darwin-amd64 | $(du -h "$DIST/samime-darwin-amd64" | cut -f1) | Intel Mac |
+| macOS Apple Silicon | samime-darwin-arm64 | $(du -h "$DIST/samime-darwin-arm64" | cut -f1) | M1/M2/M3 Mac |
+
+## 国产平台支持
+
+- ✅ 银河麒麟 Kylin OS V10 (IBus)
+- ✅ 统信 UOS (Fcitx5)
+- ✅ 深度 Deepin (Fcitx5)
+- ✅ 欧拉 openEuler (IBus/Fcitx5)
+- ✅ 龙蜥 Anolis OS (IBus/Fcitx5)
+- ✅ 飞腾/鲲鹏 ARM64
+- ✅ 龙芯 LoongArch (loong64)
+- ✅ 龙芯旧架构 (mips64le)
+
+详见 [packaging/DOMESTIC_PLATFORMS.md](packaging/DOMESTIC_PLATFORMS.md)
 
 ## 安装
 
