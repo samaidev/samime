@@ -1,8 +1,8 @@
-#include <tchar.h>
 // samime_reg.cpp - TSF 注册表写入
 #define _UNICODE
 #define UNICODE
 
+#include <tchar.h>
 #include "samime_tsf.h"
 #include <strsafe.h>
 
