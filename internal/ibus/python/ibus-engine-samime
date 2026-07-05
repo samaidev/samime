@@ -1,0 +1,143 @@
+#!/usr/bin/python3
+"""
+Samime IBus Engine 桥接器
+通过 IBus D-Bus 接收按键，转发给 samime TCP 服务（127.0.0.1:7788）
+"""
+import sys
+import os
+import socket
+import json
+
+# 确保 IBus typelib 可被找到
+os.environ.setdefault('GI_TYPELIB_PATH', '/usr/lib/x86_64-linux-gnu/girepository-1.0:/usr/lib/girepository-1.0')
+
+import gi
+gi.require_version('IBus', '1.0')
+gi.require_version('GLib', '2.0')
+from gi.repository import IBus, GLib
+
+SAMIME_HOST = '127.0.0.1'
+SAMIME_PORT = 7788
+
+
+class SamimeEngine(IBus.Engine):
+    __gtype_name__ = 'SamimeEngine'
+
+    def __init__(self):
+        super().__init__()
+        self.preedit = ''
+        self.candidates = []
+
+    def do_process_key_event(self, keyval, keycode, state):
+        if state & (IBus.ModifierType.CONTROL_MASK | IBus.ModifierType.MOD1_MASK):
+            return False
+        if (keyval >= ord('a') and keyval <= ord('z')) or \
+           (keyval >= ord('A') and keyval <= ord('Z')):
+            self.preedit += chr(keyval).lower()
+            self.update_candidates()
+            return True
+        if keyval >= ord('1') and keyval <= ord('9') and self.candidates:
+            return self.commit_candidate(keyval - ord('1'))
+        if keyval == ord(' ') and self.preedit:
+            if self.candidates:
+                return self.commit_candidate(0)
+            return False
+        if keyval == IBus.Return and self.preedit:
+            if self.candidates:
+                return self.commit_candidate(0)
+            self.commit_text(IBus.Text.new_from_string(self.preedit))
+            self.do_reset()
+            return True
+        if keyval == IBus.Escape and self.preedit:
+            self.do_reset()
+            return True
+        if keyval == IBus.BackSpace and self.preedit:
+            self.preedit = self.preedit[:-1]
+            if not self.preedit:
+                self.do_reset()
+            else:
+                self.update_candidates()
+            return True
+        return False
+
+    def update_candidates(self):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(2)
+            sock.connect((SAMIME_HOST, SAMIME_PORT))
+            sock.sendall((json.dumps({"method": "search", "preedit": self.preedit}) + "\n").encode())
+            resp = b''
+            while b'\n' not in resp:
+                data = sock.recv(65536)
+                if not data: break
+                resp += data
+            sock.close()
+            data = json.loads(resp.decode().strip())
+            self.candidates = data.get('candidates', [])[:9]
+            text = IBus.Text.new_from_string(self.preedit)
+            text.append_attribute(IBus.AttrType.UNDERLINE, IBus.AttrUnderline.SINGLE, 0, len(self.preedit))
+            self.update_preedit_text(text, len(self.preedit), True)
+            lookup = IBus.LookupTable.new(9, 0, True, True)
+            for c in self.candidates:
+                lookup.append_candidate(IBus.Text.new_from_string(c.get('Word', '')))
+            self.update_lookup_table(lookup, True)
+        except Exception as e:
+            sys.stderr.write(f"[samime] search error: {e}\n")
+
+    def commit_candidate(self, idx):
+        if idx < 0 or idx >= len(self.candidates):
+            return False
+        word = self.candidates[idx].get('Word', '')
+        pinyin = self.candidates[idx].get('Pinyin', '')
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            sock.connect((SAMIME_HOST, SAMIME_PORT))
+            sock.sendall((json.dumps({"method": "commit", "word": word, "pinyin": pinyin}) + "\n").encode())
+            sock.recv(4096)
+            sock.close()
+        except: pass
+        self.commit_text(IBus.Text.new_from_string(word))
+        self.do_reset()
+        return True
+
+    def do_reset(self):
+        self.preedit = ''
+        self.candidates = []
+        self.update_preedit_text(IBus.Text.new_from_string(''), 0, False)
+        self.hide_preedit_text()
+        self.update_lookup_table(IBus.LookupTable.new(9, 0, True, True), False)
+        self.hide_lookup_table()
+
+
+class SamimeFactory(IBus.Factory):
+    __gtype_name__ = 'SamimeFactory'
+    def __init__(self):
+        super().__init__()
+        self.connect('create-engine', self.do_create_engine)
+    def do_create_engine(self, factory, engine_name):
+        if engine_name == 'samime':
+            engine = SamimeEngine()
+            engine.set_name(engine_name)
+            return engine
+
+
+def main():
+    IBus.init()
+    bus = IBus.Bus()
+    if not bus.is_connected():
+        sys.stderr.write("[samime] Cannot connect to IBus\n")
+        sys.exit(1)
+    factory = SamimeFactory()
+    component = IBus.Component.new('org.freedesktop.IBus.Samime',
+        'Samime Chinese Input Method (Go)', '1.0.0', 'MIT', 'samime',
+        'https://github.com/samaidev/samime', '')
+    component.add_engine(IBus.EngineDesc.new('samime', 'Samime Pinyin',
+        'Samime Chinese Input Method (Go)', 'zh_CN', 'MIT', 'samime', 'us'))
+    bus.register_component(component)
+    bus.set_watch_dbus_signal(True)
+    sys.stderr.write("[samime] IBus engine ready\n")
+    GLib.MainLoop().run()
+
+if __name__ == '__main__':
+    main()

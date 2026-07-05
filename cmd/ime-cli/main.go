@@ -16,12 +16,17 @@ import (
         "github.com/zai/goime/internal/updater"
 )
 
+// hasIBusFlag 标记是否用 --ibus 参数启动（被 IBus daemon 调用）
+var hasIBusFlag bool
+
 func main() {
-        mode := flag.String("mode", "interactive", "运行模式: interactive | batch | bench | demo | service")
+        mode := flag.String("mode", "interactive", "运行模式: interactive | batch | bench | demo | service | update")
         dictPath := flag.String("dict", "", "额外加载词典文件路径")
         benchN := flag.Int("bench-n", 1000, "bench 模式查询次数")
         userDictPath := flag.String("user-dict", "", "用户词典持久化路径（空=不持久化）")
+        ibusMode := flag.Bool("ibus", false, "IBus engine 模式（被 ibus-daemon 调用时使用）")
         flag.Parse()
+        hasIBusFlag = *ibusMode
 
         // 加载词典
         t0 := time.Now()
@@ -72,6 +77,8 @@ func main() {
         case "demo":
                 runDemo(eng)
         case "service":
+                // --ibus 标志被 IBus daemon 使用，service_other.go 会检测 IBUS_ADDRESS
+                _ = ibusMode  // 已在 service_other.go 中通过环境变量检测
                 runService(eng)
         case "update":
                 runUpdateCheck()

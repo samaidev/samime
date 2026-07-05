@@ -1,6 +1,8 @@
 //go:build !windows && !darwin
 
-// Linux 等非 Windows/macOS 平台：用 TCP 模拟命名管道服务（开发测试用）
+// Linux 等非 Windows/macOS 平台
+// - 如果检测到 IBUS_ADDRESS 环境变量，启动 IBus engine 模式（被 ibus-daemon 调用时）
+// - 否则启动 TCP 服务模式（开发测试用）
 package main
 
 import (
@@ -13,11 +15,32 @@ import (
         "syscall"
 
         "github.com/zai/goime/internal/engine"
+        "github.com/zai/goime/internal/ibus"
 )
 
 const tcpAddr = "127.0.0.1:7788"
 
 func runServicePlatform(eng *engine.Engine) {
+        // 检测是否应该启动 IBus engine 模式
+        // 1. 检查 --ibus 标志
+        // 2. 检查 IBUS_ADDRESS 环境变量
+        // 3. 检查 IBus bus 文件是否存在
+        ibusAddr := os.Getenv("IBUS_ADDRESS")
+        if ibusAddr == "" {
+                ibusAddr = ibus.ReadIBusAddressFromBusFile()
+        }
+        if ibusAddr != "" || hasIBusFlag {
+                // IBus engine 模式：连接 IBus D-Bus，接收按键事件
+                fmt.Fprintf(os.Stderr, "[service] IBus engine mode (IBUS_ADDRESS detected)\n")
+                ibusEng := ibus.NewEngine(eng, "samime", "/org/freedesktop/IBus/Samime")
+                if err := ibusEng.Run(); err != nil {
+                        fmt.Fprintf(os.Stderr, "[service] IBus engine error: %v\n", err)
+                        os.Exit(1)
+                }
+                return
+        }
+
+        // TCP 服务模式（开发测试用）
         l, err := net.Listen("tcp", tcpAddr)
         if err != nil {
                 fmt.Fprintf(os.Stderr, "[service] listen %s failed: %v\n", tcpAddr, err)

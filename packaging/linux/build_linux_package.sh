@@ -53,12 +53,17 @@ build_deb() {
     cp "$STAGE/samime" "$DEB_ROOT/usr/bin/samime"
     chmod 755 "$DEB_ROOT/usr/bin/samime"
 
+    # Python IBus engine 桥接器
+    mkdir -p "$DEB_ROOT/usr/libexec"
+    cp "$ROOT/internal/ibus/python/ibus-engine-samime" "$DEB_ROOT/usr/libexec/ibus-engine-samime"
+    chmod 755 "$DEB_ROOT/usr/libexec/ibus-engine-samime"
+
     # IBus 组件配置（放到两个位置确保兼容）
     IBUS_XML='<?xml version="1.0" encoding="UTF-8"?>
 <component>
     <name>org.freedesktop.IBus.Samime</name>
     <description>Samime Chinese Input Method (Go)</description>
-    <exec>/usr/bin/samime -mode=service</exec>
+    <exec>/usr/libexec/ibus-engine-samime</exec>
     <version>1.0.0</version>
     <author>samime</author>
     <license>MIT</license>
