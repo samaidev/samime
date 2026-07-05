@@ -285,18 +285,20 @@ func (ie *IBusEngine) handleSignal(sig *dbus.Signal) {
 // 参数: keyval (uint32), keycode (uint32), state (uint32)
 // 返回: processed (bool)
 //
-// state 位掩码: 0x1000 = 释放事件（ibus 用），按下时 state & 0x1000 == 0。
-// 只处理按下事件，避免一次按键触发两次。
+// state 位掩码: IBUS_RELEASE_MASK = 0x40000000（按键释放事件）。
+// 按下事件 state & 0x40000000 == 0，释放事件该位置 1。
+// 只处理按下事件，避免一次按键触发两次（按下+释放都加字母导致重复）。
 func (ie *IBusEngine) ProcessKeyEvent(keyval, keycode, state uint32) (bool, *dbus.Error) {
         ie.mu.Lock()
         defer ie.mu.Unlock()
 
-        release := (state & 0x1000) != 0
-        log.Printf("[ibus] ProcessKeyEvent keyval=%d keycode=%d state=0x%04x release=%v preedit=%q cands=%d",
-                keyval, keycode, state, release, ie.preedit, len(ie.cands))
+        release := (state & 0x40000000) != 0
         if release {
+                // 释放事件直接透传，不处理
                 return false, nil
         }
+        log.Printf("[ibus] ProcessKeyEvent keyval=%d (%q) keycode=%d state=0x%08x preedit=%q cands=%d",
+                keyval, string(rune(keyval)), keycode, state, ie.preedit, len(ie.cands))
 
         // 数字键 1-9：选候选
         if keyval >= '1' && keyval <= '9' {
