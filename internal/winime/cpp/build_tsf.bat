@@ -2,6 +2,7 @@
 REM build_tsf.bat - 编译 samime_tsf.dll
 REM
 REM 需要 Visual Studio Build Tools (cl.exe) 或 MinGW
+REM 依赖: d2d1.lib dwrite.lib (Direct2D + DirectWrite)
 
 setlocal
 
@@ -12,8 +13,9 @@ where cl >nul 2>nul
 if %ERRORLEVEL% == 0 (
     echo [1/3] 用 cl.exe 编译...
     cl /EHsc /std:c++17 /O2 /LD ^
-       samime_tsf.cpp samime_reg.cpp ^
+       samime_tsf.cpp samime_reg.cpp d2d_renderer.cpp ^
        /link ole32.lib oleaut32.lib msctf.lib user32.lib gdi32.lib ws2_32.lib shlwapi.lib ^
+             d2d1.lib dwrite.lib ^
        /DEF:samime_tsf.def /OUT:samime_tsf.dll
     if exist samime_tsf.dll (
         echo [2/3] 编译成功: samime_tsf.dll
@@ -35,8 +37,9 @@ where g++ >nul 2>nul
 if %ERRORLEVEL% == 0 (
     echo [1/3] 用 g++ 编译...
     g++ -shared -std=c++17 -O2 -o samime_tsf.dll ^
-        samime_tsf.cpp samime_reg.cpp ^
+        samime_tsf.cpp samime_reg.cpp d2d_renderer.cpp ^
         -lole32 -loleaut32 -lmsctf -luser32 -lgdi32 -lws2_32 -lshlwapi ^
+        -ld2d1 -ldwrite ^
         -Wl,--output-def,samime_tsf.def
     if exist samime_tsf.dll (
         echo [2/3] 编译成功: samime_tsf.dll

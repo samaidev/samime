@@ -9,6 +9,7 @@ import (
         "sync"
         "time"
 
+        "github.com/zai/goime/internal/clipboard"
         "github.com/zai/goime/internal/dict"
         "github.com/zai/goime/internal/fuzzy"
         "github.com/zai/goime/internal/pinyin"
@@ -50,6 +51,15 @@ type Engine struct {
 
         // 上下文联想参数
         maxContextHistory int // 上下文历史最大长度
+
+        // N-gram 自动剪枝参数
+        maxContextPairs   int           // contextPairs 最大条目数
+        pruneThreshold    float64       // 低于此频次的条目被剪枝
+        lastPruneTime     time.Time     // 上次剪枝时间
+        pruneInterval     time.Duration // 剪枝间隔
+
+        // 剪切板历史
+        clipboardHistory *clipboard.History
 }
 
 // Config 引擎配置
@@ -96,8 +106,12 @@ func New(d *dict.Dict, cfg Config) *Engine {
                 wContext:          cfg.WContext,
                 wFuzzy:            cfg.WFuzzy,
                 wTypo:             cfg.WTypo,
-                decayHalfLife:     24 * time.Hour, // 24 小时半衰期
+                decayHalfLife:     24 * time.Hour,
                 maxContextHistory: 50,
+                maxContextPairs:   10000,
+                pruneThreshold:    1.0,
+                pruneInterval:     1 * time.Hour,
+                clipboardHistory:  clipboard.New(50), // 保存最近 50 条
         }
 }
 
@@ -755,7 +769,17 @@ func (e *Engine) Commit(word, py string) {
         if len(e.commitHistory) > e.maxContextHistory {
                 e.commitHistory = e.commitHistory[len(e.commitHistory)-e.maxContextHistory:]
         }
+
+        // === N-gram 自动剪枝 ===
+        // 超过最大条目数或距离上次剪枝超过间隔时触发
+        pruneNow := time.Now()
+        if len(e.contextPairs) > e.maxContextPairs ||
+                (pruneNow.Sub(e.lastPruneTime) > e.pruneInterval && len(e.contextPairs) > 100) {
+                e.pruneContextPairs(pruneNow)
+        }
+
         store := e.userStore
+        clipHist := e.clipboardHistory
         e.mu.Unlock()
 
         // 持久化（在锁外，避免阻塞）
@@ -771,6 +795,49 @@ func (e *Engine) Commit(word, py string) {
                         }
                 }
         }
+
+        // 记录到剪切板历史
+        if clipHist != nil {
+                clipHist.Add(word, py, "user")
+        }
+}
+
+// pruneContextPairs 剪枝 contextPairs
+// 策略：
+//   1. 删除频次 < pruneThreshold 的条目
+//   2. 如果仍超过 maxContextPairs，按频次排序保留 Top-N
+// 必须在持有 e.mu 锁时调用
+func (e *Engine) pruneContextPairs(_ time.Time) {
+        // 阶段 1：删除低频条目
+        for k, v := range e.contextPairs {
+                if v < e.pruneThreshold {
+                        delete(e.contextPairs, k)
+                }
+        }
+
+        // 阶段 2：如果仍超过上限，按频次保留 Top-N
+        if len(e.contextPairs) > e.maxContextPairs {
+                type kv struct {
+                        key string
+                        val float64
+                }
+                var entries []kv
+                for k, v := range e.contextPairs {
+                        entries = append(entries, kv{k, v})
+                }
+                // 排序（降序）
+                sort.Slice(entries, func(i, j int) bool {
+                        return entries[i].val > entries[j].val
+                })
+                // 保留 Top-N
+                keep := entries[:e.maxContextPairs]
+                e.contextPairs = make(map[string]float64, len(keep))
+                for _, kv := range keep {
+                        e.contextPairs[kv.key] = kv.val
+                }
+        }
+
+        e.lastPruneTime = time.Now()
 }
 
 // Close 关闭引擎，释放资源
@@ -818,4 +885,9 @@ func (e *Engine) Dict() *dict.Dict {
 // Fuzzy 返回模糊音引擎
 func (e *Engine) Fuzzy() *fuzzy.Engine {
         return e.fuzzy
+}
+
+// Clipboard 返回剪切板历史
+func (e *Engine) Clipboard() *clipboard.History {
+        return e.clipboardHistory
 }

@@ -100,17 +100,25 @@ public:
     void setSelectedIndex(int idx);
     int getSelectedIndex() const { return selectedIndex_; }
 
+    // 翻页（手势/键盘）
+    void pageUp();
+    void pageDown();
+
     // 窗口位置（通常在光标附近）
     void setPosition(int x, int y);
     void getPosition(int* x, int* y) const;
 
     HWND hwnd() const { return hwnd_; }
 
+    // 设置是否使用 Direct2D 渲染（默认尝试 D2D，失败回退 GDI）
+    void setUseD2D(bool use) { useD2D_ = use; }
+
 private:
     static LRESULT CALLBACK wndProc(HWND, UINT, WPARAM, LPARAM);
     LRESULT onPaint(HWND hwnd);
     void onLButtonDown(int x, int y);
-    void onAnimationTick();  // 动画定时器回调
+    void onAnimationTick();
+    void onGesture(WPARAM wParam, LPARAM lParam);  // 手势处理
 
     HWND hwnd_ = nullptr;
     int x_ = 0, y_ = 0;
@@ -118,22 +126,38 @@ private:
     std::vector<Candidate> candidates_;
     HFONT font_ = nullptr;
 
+    // === Direct2D 渲染器 ===
+    void* d2dRenderer_ = nullptr;  // D2DRenderer* (避免头文件依赖)
+    bool useD2D_ = true;
+    bool d2dInitialized_ = false;
+
+    // === 翻页状态 ===
+    int pageOffset_ = 0;  // 当前页起始候选索引
+    static const int PAGE_SIZE = 9;
+
     // === 动画状态 ===
-    // 选中项切换时的过渡动画
-    int prevSelectedIndex_ = -1;      // 上一次的选中项
-    float animProgress_ = 1.0f;       // 动画进度 0.0 ~ 1.0
-    UINT_PTR animTimer_ = 0;          // 动画定时器 ID
-    DWORD animStartTime_ = 0;         // 动画开始时间
-    static const int ANIM_DURATION_MS = 150;  // 动画持续时间
+    int prevSelectedIndex_ = -1;
+    float animProgress_ = 1.0f;
+    UINT_PTR animTimer_ = 0;
+    DWORD animStartTime_ = 0;
+    static const int ANIM_DURATION_MS = 150;
+
+    // === 触摸手势状态 ===
+    POINT touchStartPos_ = {0, 0};
+    bool isTouching_ = false;
+    int touchStartSelectedIndex_ = 0;
 
     static const TCHAR* const CLASS_NAME;
     static ATOM classAtom_;
     static ATOM registerClass();
 
-    // 启动选中切换动画
     void startSelectionAnimation(int fromIdx, int toIdx);
-    // 停止动画
     void stopAnimation();
+
+    // D2D 初始化
+    bool initD2D();
+    // D2D 渲染
+    void renderD2D(int width, int height);
 };
 
 // === 主 TextService 实现 ===

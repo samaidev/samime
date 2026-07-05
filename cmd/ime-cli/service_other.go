@@ -93,6 +93,23 @@ func handleServiceConn(conn net.Conn, eng *engine.Engine) {
                         s := eng.Dict().Stats()
                         writeServiceResp(writer, true, "", nil,
                                 fmt.Sprintf("entries=%d pinyins=%d", s.TotalEntries, s.UniquePinyin))
+                case "clipboard-history":
+                        // 返回最近 50 条提交
+                        if eng.Clipboard() != nil {
+                                entries := eng.Clipboard().Recent(50)
+                                // 序列化为 JSON 字符串放在 Error 字段（兼容协议）
+                                data, _ := json.Marshal(entries)
+                                writeServiceResp(writer, true, "", nil, string(data))
+                        } else {
+                                writeServiceResp(writer, false, "", nil, "clipboard not enabled")
+                        }
+                case "clipboard-clear":
+                        if eng.Clipboard() != nil {
+                                eng.Clipboard().Clear()
+                                writeServiceResp(writer, true, "", nil, "")
+                        } else {
+                                writeServiceResp(writer, false, "", nil, "clipboard not enabled")
+                        }
                 case "shutdown":
                         writeServiceResp(writer, true, "", nil, "")
                         return

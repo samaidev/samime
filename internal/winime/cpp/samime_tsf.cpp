@@ -10,11 +10,13 @@
 //      -lole32 -loleaut32 -lmsctf -luser32 -lgdi32 -lws2_32
 
 #include "samime_tsf.h"
+#include "d2d_renderer.h"
 #include <strsafe.h>
 #include <algorithm>
 #include <sstream>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windowsx.h>
 
 namespace samime {
 
@@ -272,10 +274,31 @@ bool CandidateWindow::create(HWND parentHwnd) {
         WS_POPUP | WS_BORDER,
         CW_USEDEFAULT, CW_USEDEFAULT, 300, 200,
         parentHwnd, nullptr, GetModuleHandle(nullptr), this);
-    return hwnd_ != nullptr;
+    if (hwnd_ == nullptr) return false;
+
+    // 注册触摸手势支持
+    LOGFONT lf = {};
+    // 启用手势
+    GESTURECONFIG gc = {};
+    gc.dwID = GID_PAN;
+    gc.dwWant = GC_PAN | GC_PAN_WITH_INERTIA;
+    gc.dwBlock = 0;
+    SetGestureConfig(hwnd_, 0, 1, &gc, sizeof(GESTURECONFIG));
+
+    // 初始化 Direct2D（失败则回退 GDI）
+    initD2D();
+
+    return true;
 }
 
 void CandidateWindow::destroy() {
+    stopAnimation();
+    if (d2dRenderer_) {
+        ((D2DRenderer*)d2dRenderer_)->release();
+        delete (D2DRenderer*)d2dRenderer_;
+        d2dRenderer_ = nullptr;
+        d2dInitialized_ = false;
+    }
     if (hwnd_) {
         DestroyWindow(hwnd_);
         hwnd_ = nullptr;
@@ -421,11 +444,44 @@ LRESULT CALLBACK CandidateWindow::wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM
             self->onLButtonDown(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
             return 0;
         case WM_TIMER:
-            if (wp == 1) {  // 动画定时器
+            if (wp == 1) {
                 self->onAnimationTick();
                 return 0;
             }
             break;
+        case WM_GESTURE:
+            self->onGesture(wp, lp);
+            return 0;
+        case WM_TOUCHBUTTONDOWN: {
+            // 触摸开始
+            self->touchStartPos_.x = GET_X_LPARAM(lp);
+            self->touchStartPos_.y = GET_Y_LPARAM(lp);
+            self->isTouching_ = true;
+            self->touchStartSelectedIndex_ = self->selectedIndex_;
+            return 0;
+        }
+        case WM_TOUCHBUTTONUP: {
+            // 触摸结束，判断滑动方向
+            if (self->isTouching_) {
+                int dx = GET_X_LPARAM(lp) - self->touchStartPos_.x;
+                int dy = GET_Y_LPARAM(lp) - self->touchStartPos_.y;
+                // 垂直滑动距离 > 50 像素时翻页
+                if (std::abs(dy) > 50 && std::abs(dy) > std::abs(dx)) {
+                    if (dy < 0) {
+                        self->pageDown();
+                    } else {
+                        self->pageUp();
+                    }
+                }
+                self->isTouching_ = false;
+            }
+            return 0;
+        }
+        case WM_SIZE:
+            if (self->d2dRenderer_) {
+                ((D2DRenderer*)self->d2dRenderer_)->onResize(LOWORD(lp), HIWORD(lp));
+            }
+            return 0;
         case WM_ERASEBKGND:
             return 1;
     }
@@ -441,6 +497,26 @@ LRESULT CandidateWindow::onPaint(HWND hwnd) {
     int width = rc.right - rc.left;
     int height = rc.bottom - rc.top;
 
+    // === 优先使用 Direct2D 渲染 ===
+    if (useD2D_ && d2dInitialized_ && d2dRenderer_) {
+        // D2D 渲染（硬件加速）
+        D2DRenderer* d2d = (D2DRenderer*)d2dRenderer_;
+        // 转换候选词格式
+        std::vector<D2DCandidate> d2dCands;
+        for (size_t i = 0; i < candidates_.size() && i < 9; i++) {
+            D2DCandidate dc;
+            dc.word = candidates_[i].word;
+            dc.pinyin = candidates_[i].pinyin;
+            dc.score = candidates_[i].score;
+            dc.source = candidates_[i].source;
+            d2dCands.push_back(dc);
+        }
+        d2d->render(width, height, d2dCands, selectedIndex_, animProgress_, prevSelectedIndex_);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+
+    // === GDI 回退渲染 ===
     // 双缓冲
     HDC memDC = CreateCompatibleDC(hdc);
     HBITMAP memBmp = CreateCompatibleBitmap(hdc, width, height);
@@ -582,6 +658,103 @@ void CandidateWindow::onLButtonDown(int x, int y) {
         // TODO: 通过 callback 通知 SamimeTextService
     }
 }
+
+// === 翻页 ===
+
+void CandidateWindow::pageUp() {
+    if (pageOffset_ > 0) {
+        pageOffset_ -= PAGE_SIZE;
+        if (pageOffset_ < 0) pageOffset_ = 0;
+        selectedIndex_ = pageOffset_;
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+}
+
+void CandidateWindow::pageDown() {
+    if (pageOffset_ + PAGE_SIZE < (int)candidates_.size()) {
+        pageOffset_ += PAGE_SIZE;
+        selectedIndex_ = pageOffset_;
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+}
+
+// === 手势处理 ===
+
+void CandidateWindow::onGesture(WPARAM wParam, LPARAM lParam) {
+    GESTUREINFO gi = {};
+    gi.cbSize = sizeof(GESTUREINFO);
+    if (!GetGestureInfo((HGESTUREINFO)lParam, &gi)) {
+        return;
+    }
+
+    switch (gi.dwID) {
+        case GID_BEGIN:
+            touchStartPos_.x = gi.ptsLocation.x;
+            touchStartPos_.y = gi.ptsLocation.y;
+            touchStartSelectedIndex_ = selectedIndex_;
+            isTouching_ = true;
+            break;
+
+        case GID_END:
+            isTouching_ = false;
+            break;
+
+        case GID_PAN: {
+            // 平移手势：垂直滑动翻页
+            if (isTouching_) {
+                int dy = gi.ptsLocation.y - touchStartPos_.y;
+                if (std::abs(dy) > 50) {
+                    if (dy < 0) {
+                        pageDown();
+                    } else {
+                        pageUp();
+                    }
+                    // 重置起点，避免连续翻页
+                    touchStartPos_.x = gi.ptsLocation.x;
+                    touchStartPos_.y = gi.ptsLocation.y;
+                }
+            }
+            break;
+        }
+
+        case GID_SCROLL: {
+            // 滚动手势
+            int dy = (int)(short)HIWORD(gi.ullArguments);
+            if (dy < 0) {
+                pageDown();
+            } else {
+                pageUp();
+            }
+            break;
+        }
+    }
+
+    if (gi.hwndTarget) {
+        CloseGestureInfoHandle((HGESTUREINFO)lParam);
+    }
+}
+
+// === Direct2D 初始化 ===
+
+bool CandidateWindow::initD2D() {
+    if (d2dInitialized_) return true;
+    if (!useD2D_) return false;
+
+    D2DRenderer* d2d = new D2DRenderer();
+    if (!d2d->initialize(hwnd_)) {
+        delete d2d;
+        useD2D_ = false;
+        OutputDebugStringW(L"[Samime] D2D init failed, falling back to GDI");
+        return false;
+    }
+    d2dRenderer_ = d2d;
+    d2dInitialized_ = true;
+    OutputDebugStringW(L"[Samime] Direct2D initialized (hardware accelerated)");
+    return true;
+}
+
+// === D2D 渲染（已在 onPaint 中调用）===
+// renderD2D 的实现在 onPaint 中内联，这里不需要单独方法
 
 // === SamimeTextService ===
 
