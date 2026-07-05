@@ -19,7 +19,6 @@ import (
         "os"
         "strings"
         "sync"
-        "unicode"
 
         "github.com/godbus/dbus/v5"
         "github.com/zai/goime/internal/engine"
