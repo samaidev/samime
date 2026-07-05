@@ -755,11 +755,18 @@ func (ie *IBusEngine) emitSignals() {
 	}
 
 	// UpdateAuxiliaryText 信号签名: (vb) —— IBusText variant, visible
-	if ie.preedit == "" {
+	//
+	// GNOME Shell 的候选窗强制竖排，不遵循 LookupTable 的 orientation=1。
+	// 所以把候选词拼成横向字符串放到 auxiliary text 里显示，作为横向候选窗：
+	//   "1.看看 2.可靠 3.开口 4.可可 5.开阔"
+	// 数字键 1-5 仍通过 ProcessKeyEvent 处理选词，上下方向键仍通过
+	// CursorUp/CursorDown 展开/折叠/翻页（LookupTable 仍发送，仅用于导航）。
+	if ie.preedit == "" || len(ie.cands) == 0 {
 		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.HideAuxiliaryText")
 	} else {
+		auxText := ie.buildHorizontalCandidates()
 		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.UpdateAuxiliaryText",
-			makeIBusTextVariant(ie.preedit), true)
+			makeIBusTextVariant(auxText), true)
 	}
 
 	// UpdateLookupTable 信号签名: (vb) —— IBusLookupTable variant, visible
@@ -844,6 +851,43 @@ func (ie *IBusEngine) makeLookupTableVariant() dbus.Variant {
 		Labels:        labelVariants,
 	}
 	return dbus.MakeVariant(tbl)
+}
+
+// buildHorizontalCandidates 构造横向候选词字符串，用于 auxiliary text 显示。
+// 格式: "1.看看 2.可靠 3.开口 4.可可 5.开阔"
+// 显示当前页（pageOffset 开始的 pageSize 个）候选，与 LookupTable 当前页一致。
+// 折叠模式下只显示前 pageSize 个；展开模式下按 pageOffset 翻页。
+func (ie *IBusEngine) buildHorizontalCandidates() string {
+	total := len(ie.cands)
+	maxVisible := pageSize
+	if !ie.expanded && total > pageSize {
+		maxVisible = pageSize
+	}
+	start := ie.pageOffset
+	if start >= total {
+		start = 0
+		ie.pageOffset = 0
+	}
+	end := start + maxVisible
+	if end > total {
+		end = total
+	}
+
+	var sb strings.Builder
+	for i := start; i < end; i++ {
+		if i > start {
+			sb.WriteString("  ")
+		}
+		labelIdx := i - start
+		sb.WriteString(string(rune('1' + labelIdx)))
+		sb.WriteString(".")
+		sb.WriteString(ie.cands[i].Word)
+	}
+	// 折叠模式下如果有更多候选，提示可按 Down 展开
+	if !ie.expanded && total > end {
+		sb.WriteString("  ↓更多")
+	}
+	return sb.String()
 }
 
 // Stop 停止

@@ -167,14 +167,16 @@ func fallbackSegment(input string) []Syllable {
                         }
                 }
                 if !matched {
-                        // 尾部剩余单字符如果是合法声母，保留为声母音节
-                        // 这样 "henh" 会切分成 [hen, h]，让 engine 能匹配"很好"
-                        rest := input[i:]
-                        if len(rest) == 1 && IsInitial(rest) {
+                        // 当前位置单字符如果是合法声母，保留为声母音节
+                        // 这样 "kk" 会切分成 [k, k]，让 engine 的 acronymMatch
+                        // 能匹配"看看""可靠""开口"等双声母缩写词；
+                        // "henh" 仍切分成 [hen, h] 匹配"很好"
+                        ch := input[i : i+1]
+                        if IsInitial(ch) {
                                 result = append(result, Syllable{
-                                        Initial: rest,
+                                        Initial: ch,
                                         Final:   "",
-                                        Raw:     rest,
+                                        Raw:     ch,
                                 })
                                 i++
                                 matched = true
