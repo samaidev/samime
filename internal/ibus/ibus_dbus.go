@@ -285,35 +285,53 @@ func (ie *IBusEngine) handleSignal(sig *dbus.Signal) {
 // ProcessKeyEvent 处理按键事件
 // 参数: keyval (uint32), keycode (uint32), state (uint32)
 // 返回: processed (bool)
+//
+// state 位掩码: 0x1000 = 释放事件（ibus 用），按下时 state & 0x1000 == 0。
+// 只处理按下事件，避免一次按键触发两次。
 func (ie *IBusEngine) ProcessKeyEvent(keyval, keycode, state uint32) (bool, *dbus.Error) {
         ie.mu.Lock()
         defer ie.mu.Unlock()
 
-        // 数字键 1-9
+        release := (state & 0x1000) != 0
+        log.Printf("[ibus] ProcessKeyEvent keyval=%d keycode=%d state=0x%04x release=%v preedit=%q cands=%d",
+                keyval, keycode, state, release, ie.preedit, len(ie.cands))
+        if release {
+                return false, nil
+        }
+
+        // 数字键 1-9：选候选
         if keyval >= '1' && keyval <= '9' {
                 idx := int(keyval - '1')
-                return ie.commitCandidate(idx), nil
+                handled := ie.commitCandidate(idx)
+                log.Printf("[ibus]   digit %d -> commitCandidate(%d)=%v", keyval, idx, handled)
+                return handled, nil
         }
 
         // 空格：选第一个候选
-        if keyval == ' ' {
+        if keyval == ' ' || keyval == 32 {
                 if ie.preedit != "" && len(ie.cands) > 0 {
-                        return ie.commitCandidate(0), nil
+                        handled := ie.commitCandidate(0)
+                        log.Printf("[ibus]   space -> commitCandidate(0)=%v", handled)
+                        return handled, nil
                 }
+                log.Printf("[ibus]   space -> passthrough (preedit=%q cands=%d)", ie.preedit, len(ie.cands))
                 return false, nil
         }
 
         // 回车
-        if keyval == 65293 { // GDK_KEY_Return
+        if keyval == 65293 || keyval == 65421 { // GDK_KEY_Return / KP_Enter
                 if ie.preedit != "" {
                         if len(ie.cands) > 0 {
-                                return ie.commitCandidate(0), nil
+                                handled := ie.commitCandidate(0)
+                                log.Printf("[ibus]   enter -> commitCandidate(0)=%v", handled)
+                                return handled, nil
                         }
-                        // 没候选，提交原始拼音
                         ie.commitText(ie.preedit)
                         ie.reset()
+                        log.Printf("[ibus]   enter -> commit raw preedit")
                         return true, nil
                 }
+                log.Printf("[ibus]   enter -> passthrough")
                 return false, nil
         }
 
@@ -321,6 +339,7 @@ func (ie *IBusEngine) ProcessKeyEvent(keyval, keycode, state uint32) (bool, *dbu
         if keyval == 65307 { // GDK_KEY_Escape
                 if ie.preedit != "" {
                         ie.reset()
+                        log.Printf("[ibus]   esc -> reset")
                         return true, nil
                 }
                 return false, nil
@@ -330,24 +349,27 @@ func (ie *IBusEngine) ProcessKeyEvent(keyval, keycode, state uint32) (bool, *dbu
         if keyval == 65288 { // GDK_KEY_BackSpace
                 if ie.preedit != "" {
                         ie.preedit = ie.preedit[:len(ie.preedit)-1]
+                        log.Printf("[ibus]   backspace -> preedit=%q", ie.preedit)
                         ie.updateCandidates()
                         return true, nil
                 }
                 return false, nil
         }
 
-        // 字母键
-        if unicode.IsLetter(rune(keyval)) {
+        // 字母键 (a-z, A-Z)
+        if (keyval >= 'a' && keyval <= 'z') || (keyval >= 'A' && keyval <= 'Z') {
                 ch := rune(keyval)
-                // 转小写
                 if ch >= 'A' && ch <= 'Z' {
-                        ch = ch + 32
+                        ch = ch + 32 // 转小写
                 }
                 ie.preedit += string(ch)
+                log.Printf("[ibus]   letter %q -> preedit=%q", string(rune(keyval)), ie.preedit)
                 ie.updateCandidates()
+                log.Printf("[ibus]   after update: cands=%d", len(ie.cands))
                 return true, nil
         }
 
+        log.Printf("[ibus]   unhandled keyval=%d -> passthrough", keyval)
         return false, nil
 }
 
