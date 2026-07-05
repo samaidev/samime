@@ -22,7 +22,8 @@ func TestLongSentence(t *testing.T) {
 		{"woaixuexi", "我爱学习"},
 		{"rengongzhineng", "人工智能"},
 		{"jintiantianqihenhao", "今天天气很好"},
-		{"woyaoqubohongwuguan", "我要去博物馆"},
+		{"woyaoqubowuguan", "我要去博物馆"},
+		{"woyaoquyindu", "我要去印度"},
 		{"nihaoa", "你好啊"},
 		{"xian", "西安/先"},
 	}

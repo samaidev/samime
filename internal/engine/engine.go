@@ -960,7 +960,7 @@ func collectSplits(input string, pos int, cur []string, out *[][]string, limit i
 }
 
 // greedyMatchSentence 贪心最长词组匹配
-// 对切分后的音节序列，从左到右尝试匹配 1-4 音节的词组
+// 对切分后的音节序列，从左到右尝试匹配 1-6 音节的词组
 // 返回拼接的整句、拼音、匹配音节数、覆盖字符数
 //
 // 匹配策略（按优先级）：
@@ -970,6 +970,9 @@ func collectSplits(input string, pos int, cur []string, out *[][]string, limit i
 //     匹配到 [gao][x] 时，用 "gaox" 前缀查到 "gaoxing"(高兴)
 //
 // 这样 hengaox -> hen(很) + gao+x(高兴) = 很高兴
+//
+// span 上限 6（之前 4）：支持更长词组，如"woyaoqu"(我要去)、
+// "bowuguan"(博物馆)等 3-6 音节词组，提升长句首选准确率
 func (e *Engine) greedyMatchSentence(syls []string) (string, string, int, int) {
         var word, py strings.Builder
         segs := 0
@@ -977,8 +980,12 @@ func (e *Engine) greedyMatchSentence(syls []string) (string, string, int, int) {
         i := 0
         for i < len(syls) {
                 matched := false
-                // 尝试 4-1 音节的词组（最长优先）
-                for span := 4; span >= 1 && i+span <= len(syls); span-- {
+                // 尝试 6-1 音节的词组（最长优先）
+                maxSpan := 6
+                if len(syls)-i < maxSpan {
+                        maxSpan = len(syls) - i
+                }
+                for span := maxSpan; span >= 1; span-- {
                         joined := strings.Join(syls[i:i+span], "")
                         // 策略 1: 精确匹配
                         entries := e.dict.Lookup(joined)
