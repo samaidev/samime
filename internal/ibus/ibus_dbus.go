@@ -370,6 +370,15 @@ func (ie *IBusEngine) ProcessKeyEvent(keyval, keycode, state uint32) (bool, *dbu
                 return true, nil
         }
 
+        // F1 (65470): 自测键 —— 直接 commit "你好"，
+        // 用于在不依赖候选窗的情况下验证 CommitText 信号链路。
+        if keyval == 65470 {
+                log.Printf("[ibus]   F1 self-test: commit 你好")
+                ie.commitText("你好")
+                ie.reset()
+                return true, nil
+        }
+
         log.Printf("[ibus]   unhandled keyval=%d -> passthrough", keyval)
         return false, nil
 }
@@ -468,24 +477,40 @@ func (ie *IBusEngine) commitCandidate(idx int) bool {
 
 // makeIBusText 把字符串包装成 IBusText 的 D-Bus 表示。
 //
-// IBusText 在 D-Bus 上的签名是 (sa{sv}sv) —— 一个结构体，含：
+// IBusText 在 D-Bus 上的签名是 (sa{sv}sv) —— 由 ibus_serializable_serialize_object
+// 生成，字段顺序如下（见 ibustext.c::ibus_text_serialize）:
+//   - name (s): 类名，固定 "IBusText"
+//   - attachments (a{sv}): IBusSerializable 的 attachments dict（空）
 //   - text (s): 文本本身
-//   - attrs (a{sv}): 属性表（可空）
-//   - cursor_pos (s): 旧字段，IBus 实际忽略
-//   - surrounding_text (v): 周围文本（可空）
+//   - attrs (v): IBusAttrList 序列化结果包在 variant 里（空 AttrList）
 //
-// 实测 godbus 里用结构体 + variant 包装能被 ibus-daemon 正确解析。
+// 注意：IBusAttrList 本身也是 IBusSerializable，签名是 (sa{sv}av)，
+// 这里用空数组占位（ibus_text_new_from_string 默认 attrs 就是空 AttrList）。
 func makeIBusText(text string) interface{} {
 	return struct {
-		Text      string
-		Attrs     []map[string]dbus.Variant
-		CursorPos string
-		Surround  dbus.Variant
+		Name        string
+		Attachments []map[string]dbus.Variant
+		Text        string
+		Attrs       dbus.Variant
 	}{
-		Text:      text,
-		Attrs:     []map[string]dbus.Variant{},
-		CursorPos: "",
-		Surround:  dbus.MakeVariant(""),
+		Name:        "IBusText",
+		Attachments: []map[string]dbus.Variant{},
+		Text:        text,
+		Attrs:       dbus.MakeVariant(makeEmptyIBusAttrList()),
+	}
+}
+
+// makeEmptyIBusAttrList 构造一个空的 IBusAttrList。
+// 签名 (sa{sv}av): 类名 + attachments + 属性数组（空）。
+func makeEmptyIBusAttrList() interface{} {
+	return struct {
+		Name        string
+		Attachments []map[string]dbus.Variant
+		Attrs       []dbus.Variant
+	}{
+		Name:        "IBusAttrList",
+		Attachments: []map[string]dbus.Variant{},
+		Attrs:       []dbus.Variant{},
 	}
 }
 
@@ -546,63 +571,57 @@ func (ie *IBusEngine) emitSignals() {
 
 // makeLookupTableVariant 构造 IBusLookupTable 的 variant。
 //
-// IBusLookupTable D-Bus 签名: (uuiuusa{sv}av)
-// 简化为最小可用结构。
+// IBusLookupTable D-Bus 签名: (sa{sv}uubiavav) —— 由
+// ibus_serializable_serialize_object + ibus_lookup_table_serialize 生成:
+//   - name (s): "IBusLookupTable"
+//   - attachments (a{sv}): 空
+//   - page_size (u)
+//   - cursor_pos (u)
+//   - cursor_visible (b): 布尔，不是 int
+//   - round (b): 布尔
+//   - orientation (i): int32
+//   - candidates (av): IBusText variant 数组
+//   - labels (av): IBusText variant 数组
+//
+// 见 src/ibuslookuptable.c::ibus_lookup_table_serialize。
 func makeLookupTableVariant(cands []engine.Candidate) dbus.Variant {
-	type ibusText struct {
-		Text      string
-		Attrs     []map[string]dbus.Variant
-		CursorPos string
-		Surround  dbus.Variant
-	}
 	type lookupTable struct {
-		PageSize      uint32
-		CursorPos     uint32
-		CursorVisible int32
-		RoundInCursor uint32
-		Orientation   uint32
-		Candidates    []ibusText
-		Labels        []ibusText
-		Properties    []map[string]dbus.Variant
+		Name           string
+		Attachments    []map[string]dbus.Variant
+		PageSize       uint32
+		CursorPos      uint32
+		CursorVisible  bool
+		Round          bool
+		Orientation    int32
+		Candidates     []dbus.Variant
+		Labels         []dbus.Variant
 	}
 
-	n := uint32(len(cands))
+	n := len(cands)
 	if n > 9 {
 		n = 9
 	}
-	if n == 0 {
-		n = 1
+
+	candVariants := make([]dbus.Variant, 0, n)
+	for i := 0; i < n; i++ {
+		candVariants = append(candVariants, makeIBusTextVariant(cands[i].Word))
 	}
 
-	candTexts := make([]ibusText, 0, len(cands))
-	for _, c := range cands {
-		candTexts = append(candTexts, ibusText{
-			Text:      c.Word,
-			Attrs:     []map[string]dbus.Variant{},
-			CursorPos: "",
-			Surround:  dbus.MakeVariant(""),
-		})
-	}
-
-	labels := make([]ibusText, 0, n)
-	for i := uint32(0); i < n; i++ {
-		labels = append(labels, ibusText{
-			Text:      string(rune('1' + i)),
-			Attrs:     []map[string]dbus.Variant{},
-			CursorPos: "",
-			Surround:  dbus.MakeVariant(""),
-		})
+	labelVariants := make([]dbus.Variant, 0, n)
+	for i := 0; i < n; i++ {
+		labelVariants = append(labelVariants, makeIBusTextVariant(string(rune('1'+i))))
 	}
 
 	tbl := lookupTable{
+		Name:          "IBusLookupTable",
+		Attachments:   []map[string]dbus.Variant{},
 		PageSize:      9,
 		CursorPos:     0,
-		CursorVisible: 1,
-		RoundInCursor: 0,
+		CursorVisible: true,
+		Round:         false,
 		Orientation:   1,
-		Candidates:    candTexts,
-		Labels:        labels,
-		Properties:    []map[string]dbus.Variant{},
+		Candidates:    candVariants,
+		Labels:        labelVariants,
 	}
 	return dbus.MakeVariant(tbl)
 }
