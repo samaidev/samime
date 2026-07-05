@@ -16,9 +16,10 @@ import (
 )
 
 func main() {
-        mode := flag.String("mode", "interactive", "运行模式: interactive | batch | bench | demo")
+        mode := flag.String("mode", "interactive", "运行模式: interactive | batch | bench | demo | service")
         dictPath := flag.String("dict", "", "额外加载词典文件路径")
         benchN := flag.Int("bench-n", 1000, "bench 模式查询次数")
+        userDictPath := flag.String("user-dict", "", "用户词典持久化路径（空=不持久化）")
         flag.Parse()
 
         // 加载词典
@@ -38,8 +39,27 @@ func main() {
         fmt.Fprintf(os.Stderr, "[goime] 词典加载: %d 条 | %d 个不同拼音 | 用时 %v\n",
                 s.TotalEntries, s.UniquePinyin, loadDur)
 
-        // 创建引擎
-        eng := engine.NewDefault(d)
+        // 创建引擎（可选持久化）
+        var eng *engine.Engine
+        if *userDictPath != "" || *mode == "service" {
+                path := *userDictPath
+                if path == "" {
+                        // 默认路径
+                        home, _ := os.UserHomeDir()
+                        path = home + "/.samime/userdict"
+                }
+                e, err := engine.NewWithUserStore(d, path)
+                if err != nil {
+                        fmt.Fprintf(os.Stderr, "[goime] 持久化用户词典初始化失败，降级到内存模式: %v\n", err)
+                        eng = engine.NewDefault(d)
+                } else {
+                        eng = e
+                        fmt.Fprintf(os.Stderr, "[goime] 用户词典持久化: %s\n", path)
+                        defer eng.Close()
+                }
+        } else {
+                eng = engine.NewDefault(d)
+        }
 
         switch *mode {
         case "interactive":
@@ -50,6 +70,8 @@ func main() {
                 runBench(eng, *benchN)
         case "demo":
                 runDemo(eng)
+        case "service":
+                runService(eng)
         default:
                 fmt.Fprintf(os.Stderr, "unknown mode: %s\n", *mode)
                 os.Exit(1)
@@ -197,4 +219,13 @@ func runDemo(eng *engine.Engine) {
                 }
                 fmt.Printf("%-40s | %-10s | %s\n", c.name, top1, others)
         }
+}
+
+// runService 服务模式：作为后台服务运行（Windows 命名管道 / Linux TCP）
+// 接收来自 TSF proxy 或 IBus 的请求
+func runService(eng *engine.Engine) {
+        fmt.Fprintln(os.Stderr, "[goime] Service mode: 等待 TSF/IBus proxy 连接...")
+        // Windows 上启动命名管道服务（见 internal/winime/pipe_windows.go）
+        // Linux/macOS 上启动 TCP 服务（开发用）
+        runServicePlatform(eng)
 }

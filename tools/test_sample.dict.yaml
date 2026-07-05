@@ -1,0 +1,28 @@
+---
+name: test_pinyin
+version: '0.1'
+sort: by_weight
+use_preset_vocabulary: false
+...
+# 这是注释
+你好	ni hao	100
+中国	zhong guo	200
+上海	shang hai	50
+北京	bei jing	80
+
+# 单字
+的	de	5000
+是	shi	4000
+了	le	3000
+
+# 带声调的（部分 Rime 方案）
+测试	ce4 shi4	60
+拼音	pin1 yin1	100
+
+# 多字词
+人工智能	rengongzhi neng	30
+机器学习	jiqi xuexi	40
+中国人	zhongguo ren	90
+
+# 缺失频次
+你好啊	ni hao a

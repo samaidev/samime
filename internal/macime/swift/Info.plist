@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh_CN</string>
+    <key>CFBundleExecutable</key>
+    <string>SamimeInputMethod</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.samime.inputmethod</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Samime Input Method</string>
+    <key>CFBundlePackageType</key>
+    <string>BNDL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>InputMethodConnectionName</key>
+    <string>SamimeInputMethod_1_Connection</string>
+    <key>InputMethodServerControllerClass</key>
+    <string>SamimeInputController</string>
+    <key>tsInputMethodCharacterRepertoireKey</key>
+    <array>
+        <string>Hant</string>
+        <string>Hans</string>
+    </array>
+    <key>tsInputMethodIconFileKey</key>
+    <string>icon.icns</string>
+    <key>LSBackgroundOnly</key>
+    <true/>
+</dict>
+</plist>

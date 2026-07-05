@@ -36,11 +36,14 @@
 | `internal/pinyin` | 拼音切分、声韵母识别、DP 最优切分 | AC 自动机 + DP |
 | `internal/dict` | 词典加载与前缀检索 | `go:embed` + Trie |
 | `internal/fuzzy` | 模糊音、邻键容错、编辑距离 | 规则引擎 + BK-Tree 思路 |
-| `internal/segmenter` | **整句切分**（DP + 词频概率） | 动态规划 + 对数概率 |
+| `internal/segmenter` | **整句切分**（DP + 词频 + **2-gram LM**） | 动态规划 + 对数概率 + 重排 |
 | `internal/engine` | 核心引擎，组合各模块 | 综合打分排序 |
+| `internal/userdict` | **用户词典持久化** | BadgerDB (LSM-Tree) |
 | `internal/ibus` | IBus 适配器 | D-Bus（待完善）+ stdin 测试 |
-| `internal/winime` | Windows TSF 适配层（骨架） | 命名管道 + TSF proxy（计划中） |
-| `cmd/ime-cli` | CLI 测试入口 | 4 种模式 |
+| `internal/winime` | **Windows TSF 适配** | winio 命名管道 + C++ TSF proxy |
+| `internal/macime` | **macOS IMK 适配** | Unix Socket + Swift IMK bundle |
+| `tools/rime_convert.py` | **Rime 词库转换** | Python |
+| `cmd/ime-cli` | CLI 入口 | 5 种模式（含 service） |
 
 ## 容错能力（三层模型）
 
@@ -185,16 +188,21 @@ bash scripts/test_all.sh
 - [x] **Windows 上验证（Win11 实测）**
 - [x] **跨平台交叉编译（Linux/Windows/macOS）**
 
-### Phase 2（计划中）
-- [ ] 2-gram 语言模型（提升排序质量）
-- [ ] 用户词典持久化（BadgerDB）
-- [ ] Windows TSF 完整适配（C++ 薄壳 + 命名管道）
+### Phase 2（已完成 ✅）
+- [x] **2-gram 语言模型**（jieba 词典训练，30w 2-gram，6.4k 上下文）
+- [x] **用户词典持久化**（BadgerDB，跨进程保留）
+- [x] **Rime 词库转换工具**（Python，支持声调/空格处理）
+- [x] **Windows TSF 适配**（Go 命名管道服务 + C++ TSF proxy 骨架）
+- [x] **macOS IMK 适配**（Go Unix Socket 服务 + Swift IMK bundle 骨架）
+- [x] **service 模式**（CLI 5 种模式）
+
+### Phase 3（计划中）
+- [ ] 完整 TSF COM 实现（ITfKeyEventSink, 候选窗 UI）
+- [ ] 完整 IMK 实现（候选窗，图标，签名公证）
 - [ ] IBus D-Bus 完整适配
 - [ ] Fcitx5 适配
 
-### Phase 3（规划中）
-- [ ] Windows TSF 适配（C++ 薄壳 + gRPC）
-- [ ] macOS IMK 适配（Swift 薄壳 + gRPC）
+### Phase 4（规划中）
 - [ ] 配置文件（兼容 Rime YAML）
 - [ ] 云端词库同步
 - [ ] 主题 / 候选窗 UI

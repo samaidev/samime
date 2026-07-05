@@ -2,6 +2,7 @@
 package engine
 
 import (
+        "log"
         "sort"
         "strings"
         "sync"
@@ -11,6 +12,7 @@ import (
         "github.com/zai/goime/internal/fuzzy"
         "github.com/zai/goime/internal/pinyin"
         "github.com/zai/goime/internal/segmenter"
+        "github.com/zai/goime/internal/userdict"
 )
 
 // Candidate 候选词
@@ -28,8 +30,9 @@ type Engine struct {
         segmenter  *segmenter.Segmenter
 
         mu            sync.RWMutex
-        userFreq      map[string]float64 // key: word|pinyin, val: 频次
-        commitHistory []string           // 最近提交的词（用于上下文）
+        userFreq      map[string]float64 // 内存缓存
+        userStore     *userdict.Store    // 持久化存储（可选）
+        commitHistory []string
 
         // 排序权重
         wPinyinMatch float64
@@ -64,10 +67,17 @@ func DefaultConfig() Config {
 
 // New 创建引擎
 func New(d *dict.Dict, cfg Config) *Engine {
+        // 尝试加载 2-gram 模型（失败则降级到纯词频）
+        var seg *segmenter.Segmenter
+        if bm, err := segmenter.LoadBigramModel(); err == nil {
+                seg, _ = segmenter.NewWithBigram(d, bm)
+        } else {
+                seg = segmenter.New(d)
+        }
         return &Engine{
                 dict:         d,
                 fuzzy:        fuzzy.New(),
-                segmenter:    segmenter.New(d),
+                segmenter:    seg,
                 userFreq:     make(map[string]float64),
                 wPinyinMatch: cfg.WPinyinMatch,
                 wFreq:        cfg.WFreq,
@@ -81,6 +91,20 @@ func New(d *dict.Dict, cfg Config) *Engine {
 // NewDefault 用默认配置创建
 func NewDefault(d *dict.Dict) *Engine {
         return New(d, DefaultConfig())
+}
+
+// NewWithUserStore 创建带持久化用户词典的引擎
+// path 为空时使用默认路径 ~/.samime/userdict
+func NewWithUserStore(d *dict.Dict, path string) (*Engine, error) {
+        store, err := userdict.New(path)
+        if err != nil {
+                return nil, err
+        }
+        e := NewDefault(d)
+        e.userStore = store
+        // 加载已有用户频次到内存
+        e.userFreq = store.All()
+        return e, nil
 }
 
 // Search 输入拼音串，返回候选列表
@@ -361,15 +385,34 @@ func (e *Engine) sortCandidates(in map[string]*Candidate) []Candidate {
 }
 
 // Commit 用户选定了某个候选词，更新用户频次
+// 如果启用了持久化，会异步写入 BadgerDB
 func (e *Engine) Commit(word, py string) {
         e.mu.Lock()
-        defer e.mu.Unlock()
         key := word + "|" + py
         e.userFreq[key]++
         e.commitHistory = append(e.commitHistory, word)
         if len(e.commitHistory) > 100 {
                 e.commitHistory = e.commitHistory[len(e.commitHistory)-100:]
         }
+        store := e.userStore
+        e.mu.Unlock()
+
+        // 持久化（在锁外，避免阻塞）
+        if store != nil {
+                if err := store.Incr(word, py); err != nil {
+                        log.Printf("[engine] userdict.Incr failed: %v", err)
+                }
+        }
+}
+
+// Close 关闭引擎，释放资源
+func (e *Engine) Close() error {
+        e.mu.Lock()
+        defer e.mu.Unlock()
+        if e.userStore != nil {
+                return e.userStore.Close()
+        }
+        return nil
 }
 
 // ResetContext 重置上下文（用户按了标点或换行）
