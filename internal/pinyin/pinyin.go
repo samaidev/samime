@@ -167,8 +167,22 @@ func fallbackSegment(input string) []Syllable {
                         }
                 }
                 if !matched {
-                        // 跳过非法字符
-                        i++
+                        // 尾部剩余单字符如果是合法声母，保留为声母音节
+                        // 这样 "henh" 会切分成 [hen, h]，让 engine 能匹配"很好"
+                        rest := input[i:]
+                        if len(rest) == 1 && IsInitial(rest) {
+                                result = append(result, Syllable{
+                                        Initial: rest,
+                                        Final:   "",
+                                        Raw:     rest,
+                                })
+                                i++
+                                matched = true
+                        }
+                        if !matched {
+                                // 跳过非法字符
+                                i++
+                        }
                 }
         }
         return result

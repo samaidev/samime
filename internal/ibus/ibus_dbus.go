@@ -35,15 +35,24 @@ type IBusEngine struct {
         running  bool
 
         // IBus 引擎状态
-        preedit  string
-        cands    []engine.Candidate
+        preedit   string
+        cands     []engine.Candidate
         cursorPos int
+
+        // 候选窗分页状态
+        // expanded: false=折叠（只显示第 1 页 5 个），true=展开（可翻页看更多）
+        // pageOffset: 当前页在 cands 中的起始索引（0, 5, 10, ...）
+        expanded   bool
+        pageOffset int
 
         // IBus 属性
         engineName string
         engineDesc string
         engineIcon string
 }
+
+// pageSize 每页显示的候选词数量
+const pageSize = 5
 
 // NewEngine 创建 IBus 引擎
 // busName 例: "org.freedesktop.IBus.Samime"
@@ -300,11 +309,18 @@ func (ie *IBusEngine) ProcessKeyEvent(keyval, keycode, state uint32) (bool, *dbu
         log.Printf("[ibus] ProcessKeyEvent keyval=%d (%q) keycode=%d state=0x%08x preedit=%q cands=%d",
                 keyval, string(rune(keyval)), keycode, state, ie.preedit, len(ie.cands))
 
-        // 数字键 1-9：选候选
+        // 数字键 1-5：选当前页的候选（1=第1个，5=第5个）
+        // 6-9 也支持（兼容候选数大于 5 但同页显示的情况）
         if keyval >= '1' && keyval <= '9' {
-                idx := int(keyval - '1')
+                idx := ie.pageOffset + int(keyval-'1')
+                if idx >= len(ie.cands) {
+                        // 超出范围，透传
+                        log.Printf("[ibus]   digit %d -> idx %d out of range (cands=%d)", keyval, idx, len(ie.cands))
+                        return false, nil
+                }
                 handled := ie.commitCandidate(idx)
-                log.Printf("[ibus]   digit %d -> commitCandidate(%d)=%v", keyval, idx, handled)
+                log.Printf("[ibus]   digit %d -> commitCandidate(pageOffset=%d + %d = %d)=%v",
+                        keyval, ie.pageOffset, int(keyval-'1'), idx, handled)
                 return handled, nil
         }
 
@@ -496,10 +512,82 @@ func (ie *IBusEngine) Disable() *dbus.Error {
 }
 
 // PageUp / PageDown / CursorUp / CursorDown 候选窗翻页
-func (ie *IBusEngine) PageUp() *dbus.Error     { return nil }
-func (ie *IBusEngine) PageDown() *dbus.Error   { return nil }
-func (ie *IBusEngine) CursorUp() *dbus.Error   { return nil }
-func (ie *IBusEngine) CursorDown() *dbus.Error { return nil }
+// 下方向键展开候选窗（显示更多），上方向键在第一页时折叠，其他页翻页。
+func (ie *IBusEngine) PageUp() *dbus.Error {
+	ie.mu.Lock()
+	defer ie.mu.Unlock()
+	if len(ie.cands) == 0 {
+		return nil
+	}
+	ie.expanded = true
+	if ie.pageOffset >= pageSize {
+		ie.pageOffset -= pageSize
+	} else {
+		// 循环到最后一页
+		total := len(ie.cands)
+		lastPageStart := ((total - 1) / pageSize) * pageSize
+		ie.pageOffset = lastPageStart
+	}
+	log.Printf("[ibus] PageUp -> expanded=%v pageOffset=%d", ie.expanded, ie.pageOffset)
+	ie.emitSignals()
+	return nil
+}
+func (ie *IBusEngine) PageDown() *dbus.Error {
+	ie.mu.Lock()
+	defer ie.mu.Unlock()
+	if len(ie.cands) == 0 {
+		return nil
+	}
+	ie.expanded = true
+	total := len(ie.cands)
+	if ie.pageOffset+pageSize < total {
+		ie.pageOffset += pageSize
+	} else {
+		// 循回第一页
+		ie.pageOffset = 0
+	}
+	log.Printf("[ibus] PageDown -> expanded=%v pageOffset=%d", ie.expanded, ie.pageOffset)
+	ie.emitSignals()
+	return nil
+}
+func (ie *IBusEngine) CursorUp() *dbus.Error {
+	ie.mu.Lock()
+	defer ie.mu.Unlock()
+	if len(ie.cands) == 0 {
+		return nil
+	}
+	// 在第一页时按上 = 折叠
+	if ie.pageOffset == 0 {
+		ie.expanded = false
+		log.Printf("[ibus] CursorUp -> fold (expanded=false)")
+	} else {
+		ie.expanded = true
+		if ie.pageOffset >= pageSize {
+			ie.pageOffset -= pageSize
+		}
+		log.Printf("[ibus] CursorUp -> pageOffset=%d", ie.pageOffset)
+	}
+	ie.emitSignals()
+	return nil
+}
+func (ie *IBusEngine) CursorDown() *dbus.Error {
+	ie.mu.Lock()
+	defer ie.mu.Unlock()
+	if len(ie.cands) == 0 {
+		return nil
+	}
+	// 下方向键 = 展开（如果折叠则展开，如果在最后一页则循环）
+	ie.expanded = true
+	total := len(ie.cands)
+	if ie.pageOffset+pageSize < total {
+		ie.pageOffset += pageSize
+	} else {
+		ie.pageOffset = 0
+	}
+	log.Printf("[ibus] CursorDown -> expanded=%v pageOffset=%d", ie.expanded, ie.pageOffset)
+	ie.emitSignals()
+	return nil
+}
 
 // CandidateClicked 候选词被点击
 func (ie *IBusEngine) CandidateClicked(idx uint32, button, state uint32) *dbus.Error {
@@ -528,6 +616,9 @@ func (ie *IBusEngine) PropertyHide(name string) *dbus.Error {
 
 func (ie *IBusEngine) updateCandidates() {
         ie.cands = ie.engine.Search(ie.preedit)
+        // preedit 变化时重置分页状态（回到第一页、折叠）
+        ie.pageOffset = 0
+        ie.expanded = false
         ie.emitSignals()
 }
 
@@ -605,6 +696,8 @@ func (ie *IBusEngine) reset() {
 	ie.preedit = ""
 	ie.cands = nil
 	ie.cursorPos = 0
+	ie.pageOffset = 0
+	ie.expanded = false
 	ie.engine.ResetContext()
 	ie.emitSignals()
 }
@@ -639,7 +732,7 @@ func (ie *IBusEngine) emitSignals() {
 	// UpdateLookupTable 信号签名: (vb) —— IBusLookupTable variant, visible
 	if len(ie.cands) > 0 {
 		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.UpdateLookupTable",
-			makeLookupTableVariant(ie.cands), true)
+			ie.makeLookupTableVariant(), true)
 		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.ShowLookupTable")
 	} else {
 		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.HideLookupTable")
@@ -656,12 +749,15 @@ func (ie *IBusEngine) emitSignals() {
 //   - cursor_pos (u)
 //   - cursor_visible (b): 布尔，不是 int
 //   - round (b): 布尔
-//   - orientation (i): int32
+//   - orientation (i): int32 (1=横向, 2=纵向)
 //   - candidates (av): IBusText variant 数组
 //   - labels (av): IBusText variant 数组
 //
 // 见 src/ibuslookuptable.c::ibus_lookup_table_serialize。
-func makeLookupTableVariant(cands []engine.Candidate) dbus.Variant {
+//
+// 分页：只发送当前页（pageOffset 开始的 pageSize 个）候选词。
+// 标签固定 1-5 对应当前页内的候选。
+func (ie *IBusEngine) makeLookupTableVariant() dbus.Variant {
 	type lookupTable struct {
 		Name          string
 		Attachments   map[string]dbus.Variant
@@ -674,29 +770,43 @@ func makeLookupTableVariant(cands []engine.Candidate) dbus.Variant {
 		Labels        []dbus.Variant
 	}
 
-	n := len(cands)
-	if n > 9 {
-		n = 9
+	total := len(ie.cands)
+	// 折叠模式下只显示第一页；展开模式下按 pageOffset 翻页
+	maxVisible := pageSize
+	if !ie.expanded && total > pageSize {
+		maxVisible = pageSize
 	}
 
-	candVariants := make([]dbus.Variant, 0, n)
-	for i := 0; i < n; i++ {
-		candVariants = append(candVariants, makeIBusTextVariant(cands[i].Word))
+	start := ie.pageOffset
+	if start >= total {
+		start = 0
+		ie.pageOffset = 0
+	}
+	end := start + maxVisible
+	if end > total {
+		end = total
 	}
 
-	labelVariants := make([]dbus.Variant, 0, n)
-	for i := 0; i < n; i++ {
-		labelVariants = append(labelVariants, makeIBusTextVariant(string(rune('1'+i))))
+	candVariants := make([]dbus.Variant, 0, end-start)
+	for i := start; i < end; i++ {
+		candVariants = append(candVariants, makeIBusTextVariant(ie.cands[i].Word))
+	}
+
+	labelVariants := make([]dbus.Variant, 0, end-start)
+	for i := start; i < end; i++ {
+		// 标签 1-5 对应当前页内位置
+		labelIdx := i - start
+		labelVariants = append(labelVariants, makeIBusTextVariant(string(rune('1'+labelIdx))))
 	}
 
 	tbl := lookupTable{
 		Name:          "IBusLookupTable",
 		Attachments:   map[string]dbus.Variant{},
-		PageSize:      9,
+		PageSize:      uint32(pageSize),
 		CursorPos:     0,
 		CursorVisible: true,
-		Round:         false,
-		Orientation:   1,
+		Round:         ie.expanded, // 展开时循环翻页
+		Orientation:   1,            // 横向显示
 		Candidates:    candVariants,
 		Labels:        labelVariants,
 	}

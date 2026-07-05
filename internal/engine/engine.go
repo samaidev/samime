@@ -221,6 +221,13 @@ func (e *Engine) Search(input string) []Candidate {
                 e.prefixMatch(input, candMap)
         }
 
+        // 4.6 混合音节前缀匹配：输入 "henh"（hen + h）时，
+        // 用完整音节串 + 尾部声母做前缀查找，能匹配 "henhao" → "很好"
+        // 这样用户输入到 henh 就能看到"很好"候选，不必输完整 henhao
+        if hasTrailingInitial(syls) {
+                e.mixedInitialMatch(syls, candMap)
+        }
+
         // 4.5 单声母联想：输入 "n" 等单声母时返回高频字
         if len(syls) == 1 && pinyin.IsInitial(syls[0].Raw) && len(candMap) < 5 {
                 e.singleInitialMatch(syls[0].Raw, candMap)
@@ -611,6 +618,51 @@ func (e *Engine) prefixMatch(input string, out map[string]*Candidate) {
                                         Word:   ent.Word,
                                         Pinyin: ent.Pinyin,
                                         Score:  e.wPinyinMatch*0.5 + ent.Freq*e.wFreq*0.3,
+                                        Source: "dict",
+                                }
+                        }
+                }
+        }
+}
+
+// hasTrailingInitial 检查音节序列是否以纯声母音节结尾
+// 例如 [hen, h] 返回 true（h 是纯声母，Final 为空）
+func hasTrailingInitial(syls []pinyin.Syllable) bool {
+        if len(syls) < 2 {
+                return false
+        }
+        last := syls[len(syls)-1]
+        // 纯声母音节：Initial 非空，Final 为空，Raw 是单字符声母
+        return last.Final == "" && len(last.Raw) == 1 && pinyin.IsInitial(last.Raw)
+}
+
+// mixedInitialMatch 混合音节前缀匹配
+// 输入 "henh"（切分为 [hen, h]）时，用 "henh" 作为前缀查找词典，
+// 能匹配到 "henhao"（很好）、"henhei"（很黑）等，让用户输入到 henh 就出候选。
+// 分数介于精确匹配和前缀匹配之间。
+func (e *Engine) mixedInitialMatch(syls []pinyin.Syllable, out map[string]*Candidate) {
+        // 拼接完整输入串作为前缀
+        prefix := pinyin.Join(syls)
+        if len(prefix) < 2 {
+                return
+        }
+        prefixes := e.dict.LookupPrefix(prefix)
+        for _, py := range prefixes {
+                if py == prefix {
+                        continue // 已被 exactMatch 处理
+                }
+                entries := e.dict.Lookup(py)
+                for i, ent := range entries {
+                        if i >= 3 {
+                                break
+                        }
+                        key := ent.Word + "|" + ent.Pinyin
+                        if _, ok := out[key]; !ok {
+                                out[key] = &Candidate{
+                                        Word:   ent.Word,
+                                        Pinyin: ent.Pinyin,
+                                        // 分数略高于普通 prefixMatch，因为是更精确的混合匹配
+                                        Score:  e.wPinyinMatch*0.7 + ent.Freq*e.wFreq*0.4,
                                         Source: "dict",
                                 }
                         }
