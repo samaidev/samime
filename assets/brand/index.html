@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Samime — 智能中文输入法 | SamAI Group</title>
+    <meta name="description" content="Samime 是 SamAI Group 开发的跨平台中文输入法，用 Go 编写，支持 Windows/macOS/Linux">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%230078D7'/><text x='50' y='68' font-size='56' font-weight='bold' text-anchor='middle' fill='white' font-family='Arial'>S</text></svg>">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            background: #0a0e27;
+            color: #e0e0e0;
+            line-height: 1.6;
+            overflow-x: hidden;
+        }
+
+        /* Hero Section */
+        .hero {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            padding: 2rem;
+            background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 50%, #0a0e27 100%);
+            position: relative;
+        }
+        .hero::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: radial-gradient(circle at 50% 50%, rgba(0,120,215,0.15) 0%, transparent 60%);
+            pointer-events: none;
+        }
+        .hero-content { position: relative; z-index: 1; max-width: 800px; }
+        .logo {
+            width: 120px; height: 120px;
+            margin: 0 auto 2rem;
+            background: linear-gradient(135deg, #0078D7, #005AB4);
+            border-radius: 28px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 64px;
+            font-weight: bold;
+            color: white;
+            box-shadow: 0 20px 60px rgba(0,120,215,0.4);
+            animation: float 3s ease-in-out infinite;
+        }
+        @keyframes float {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-10px); }
+        }
+        .hero h1 {
+            font-size: 3.5rem;
+            margin-bottom: 0.5rem;
+            background: linear-gradient(135deg, #fff, #64C8FF);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .hero .tagline {
+            font-size: 1.4rem;
+            color: #8892b0;
+            margin-bottom: 0.5rem;
+        }
+        .hero .tagline-en {
+            font-size: 1rem;
+            color: #5a6380;
+            margin-bottom: 2.5rem;
+        }
+        .cta-buttons {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+            flex-wrap: wrap;
+            margin-bottom: 2rem;
+        }
+        .btn {
+            display: inline-block;
+            padding: 14px 36px;
+            border-radius: 10px;
+            text-decoration: none;
+            font-size: 1.1rem;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, #0078D7, #005AB4);
+            color: white;
+            box-shadow: 0 4px 20px rgba(0,120,215,0.3);
+        }
+        .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 8px 30px rgba(0,120,215,0.5); }
+        .btn-secondary {
+            background: rgba(255,255,255,0.08);
+            color: #e0e0e0;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .btn-secondary:hover { background: rgba(255,255,255,0.12); }
+
+        .platforms {
+            display: flex;
+            gap: 2rem;
+            justify-content: center;
+            margin-top: 2rem;
+            opacity: 0.6;
+        }
+        .platforms span { font-size: 1.5rem; }
+
+        /* Features Section */
+        .features {
+            padding: 6rem 2rem;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .features h2 {
+            text-align: center;
+            font-size: 2.5rem;
+            margin-bottom: 3rem;
+            color: #fff;
+        }
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+        }
+        .feature-card {
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.06);
+            border-radius: 16px;
+            padding: 2rem;
+            transition: all 0.3s ease;
+        }
+        .feature-card:hover {
+            transform: translateY(-4px);
+            border-color: rgba(0,120,215,0.3);
+            box-shadow: 0 10px 40px rgba(0,120,215,0.1);
+        }
+        .feature-icon {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+        }
+        .feature-card h3 {
+            font-size: 1.3rem;
+            color: #64C8FF;
+            margin-bottom: 0.5rem;
+        }
+        .feature-card p {
+            color: #8892b0;
+            font-size: 0.95rem;
+        }
+
+        /* Stats Section */
+        .stats {
+            padding: 4rem 2rem;
+            background: rgba(0,120,215,0.05);
+            border-top: 1px solid rgba(255,255,255,0.06);
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 2rem;
+            max-width: 1000px;
+            margin: 0 auto;
+            text-align: center;
+        }
+        .stat-item .number {
+            font-size: 3rem;
+            font-weight: bold;
+            color: #64C8FF;
+        }
+        .stat-item .label {
+            color: #8892b0;
+            margin-top: 0.5rem;
+        }
+
+        /* Download Section */
+        .download {
+            padding: 6rem 2rem;
+            max-width: 900px;
+            margin: 0 auto;
+            text-align: center;
+        }
+        .download h2 {
+            font-size: 2.5rem;
+            margin-bottom: 2rem;
+        }
+        .download-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1.5rem;
+            margin-top: 2rem;
+        }
+        .download-card {
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 12px;
+            padding: 2rem;
+            text-decoration: none;
+            color: #e0e0e0;
+            transition: all 0.3s ease;
+        }
+        .download-card:hover {
+            border-color: #0078D7;
+            background: rgba(0,120,215,0.08);
+        }
+        .download-card .platform-icon { font-size: 2rem; margin-bottom: 0.5rem; }
+        .download-card .platform-name { font-size: 1.2rem; font-weight: 600; color: #fff; }
+        .download-card .platform-desc { color: #8892b0; font-size: 0.9rem; margin-top: 0.3rem; }
+
+        /* About Section */
+        .about {
+            padding: 4rem 2rem;
+            text-align: center;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        .about h2 { font-size: 2rem; margin-bottom: 1rem; }
+        .about p { color: #8892b0; margin-bottom: 1rem; }
+
+        /* Footer */
+        footer {
+            padding: 2rem;
+            text-align: center;
+            border-top: 1px solid rgba(255,255,255,0.06);
+            color: #5a6380;
+            font-size: 0.9rem;
+        }
+        footer a { color: #64C8FF; text-decoration: none; }
+
+        @media (max-width: 768px) {
+            .hero h1 { font-size: 2.5rem; }
+            .hero .tagline { font-size: 1.1rem; }
+        }
+    </style>
+</head>
+<body>
+    <!-- Hero -->
+    <section class="hero">
+        <div class="hero-content">
+            <div class="logo">S</div>
+            <h1>Samime</h1>
+            <p class="tagline">智能中文输入法 · 跨平台 · 开源</p>
+            <p class="tagline-en">Intelligent Chinese Input Method · Cross-Platform · Open Source</p>
+            <div class="cta-buttons">
+                <a href="#download" class="btn btn-primary">下载安装</a>
+                <a href="https://github.com/samaidev/samime" class="btn btn-secondary">GitHub</a>
+            </div>
+            <div class="platforms">
+                <span>Windows</span>
+                <span>macOS</span>
+                <span>Linux</span>
+            </div>
+        </div>
+    </section>
+
+    <!-- Features -->
+    <section class="features">
+        <h2>核心特性</h2>
+        <div class="feature-grid">
+            <div class="feature-card">
+                <div class="feature-icon">📚</div>
+                <h3>海量词库</h3>
+                <p>136,000 词条内置词典（jieba）+ 1,280,000 条 2-gram 语言模型（Wikipedia 训练），覆盖日常输入 99%+ 场景</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">🧠</div>
+                <h3>智能整句切分</h3>
+                <p>DP 动态规划 + 2-gram 重排，输入 "woaixuexi" 直接识别为 "我爱学习"，支持 3-gram 上下文联想</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">🎯</div>
+                <h3>强大容错</h3>
+                <p>模糊音（z/zh, n/l, f/h 等方言）+ 邻键容错 + 声母遗漏 + 拼写纠错，输入 "nigao" 也能出 "你好"</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">💾</div>
+                <h3>用户词典持久化</h3>
+                <p>BadgerDB 嵌入式存储，跨进程保留用户习惯，时间衰减让最近输入权重更高</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">🔗</div>
+                <h3>上下文联想</h3>
+                <p>2-gram + 3-gram 共现模型，提交"我"后输入"n"优先返回"你"，自动学习用户输入模式</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">⚡</div>
+                <h3>硬件加速渲染</h3>
+                <p>Windows Direct2D + macOS NSVisualEffectView 毛玻璃，GPU 加速候选词窗口，触摸手势翻页</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">🔤</div>
+                <h3>单字母联想</h3>
+                <p>输入 "n" 返回高频字（你/年/那/能），输入 "nh" 联想 "你好"，首字母缩写快速输入</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">📋</div>
+                <h3>剪切板历史</h3>
+                <p>自动保存最近 50 条提交记录，支持搜索和恢复，N-gram 自动剪枝避免内存增长</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">🌍</div>
+                <h3>跨平台原生</h3>
+                <p>Windows TSF COM + macOS IMK + Linux IBus/Fcitx5，三平台原生适配，Go 核心引擎共享</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Stats -->
+    <section class="stats">
+        <div class="stats-grid">
+            <div class="stat-item">
+                <div class="number">136K</div>
+                <div class="label">内置词条</div>
+            </div>
+            <div class="stat-item">
+                <div class="number">1.28M</div>
+                <div class="label">2-gram 模型</div>
+            </div>
+            <div class="stat-item">
+                <div class="number">3,669</div>
+                <div class="label">QPS 吞吐量</div>
+            </div>
+            <div class="stat-item">
+                <div class="number">200+</div>
+                <div class="label">测试用例</div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Download -->
+    <section class="download" id="download">
+        <h2>下载安装</h2>
+        <p style="color: #8892b0;">选择你的平台，免费下载安装</p>
+        <div class="download-grid">
+            <a href="https://github.com/samaidev/samime/releases/latest" class="download-card">
+                <div class="platform-icon">🪟</div>
+                <div class="platform-name">Windows</div>
+                <div class="platform-desc">Windows 10/11 (64位)<br>NSIS 安装包 · 10.5 MB</div>
+            </a>
+            <a href="https://github.com/samaidev/samime/releases/latest" class="download-card">
+                <div class="platform-icon">🍎</div>
+                <div class="platform-name">macOS</div>
+                <div class="platform-desc">macOS 11+ (Universal)<br>.dmg 安装包</div>
+            </a>
+            <a href="https://github.com/samaidev/samime/releases/latest" class="download-card">
+                <div class="platform-icon">🐧</div>
+                <div class="platform-name">Linux</div>
+                <div class="platform-desc">.deb / .rpm / AppImage<br>IBus + Fcitx5 支持</div>
+            </a>
+        </div>
+    </section>
+
+    <!-- About -->
+    <section class="about">
+        <h2>关于 SamAI Group</h2>
+        <p><strong>SamAI Group</strong> 是专注于人工智能与中文自然语言处理的技术团队。</p>
+        <p>我们的使命是让中文输入更智能、更高效、更自然。Samime 是我们的开源旗舰项目，用 Go 语言编写，覆盖 Windows、macOS 和 Linux 三大平台。</p>
+        <p>
+            <a href="https://samai.cc">samai.cc</a> ·
+            <a href="https://github.com/samaidev">GitHub</a> ·
+            <a href="mailto:contact@samai.cc">联系我们</a>
+        </p>
+    </section>
+
+    <!-- Footer -->
+    <footer>
+        <p>© 2024-2026 <a href="https://samai.cc">SamAI Group</a> · MIT License · Powered by Go</p>
+    </footer>
+</body>
+</html>

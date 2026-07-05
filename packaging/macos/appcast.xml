@@ -1,0 +1,38 @@
+<?xml version="1.0" standalone="yes"?>
+<!-- Samime appcast.xml - Sparkle 更新源 -->
+<!-- 发布到: https://samai.cc/samime/appcast.xml -->
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>Samime 更新</title>
+        <link>https://samai.cc/samime/appcast.xml</link>
+        <description>Samime 中文输入法更新</description>
+        <language>zh-CN</language>
+
+        <item>
+            <title>Samime 1.0.0</title>
+            <pubDate>Sat, 05 Jul 2026 12:00:00 +0800</pubDate>
+            <sparkle:version>1</sparkle:version>
+            <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>11.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[
+                <h2>Samime 1.0.0 发布</h2>
+                <ul>
+                    <li>136k 词条内置词典</li>
+                    <li>128w 2-gram 语言模型</li>
+                    <li>整句切分 + 模糊音 + 容错</li>
+                    <li>用户词典持久化</li>
+                    <li>上下文联想（2-gram + 3-gram）</li>
+                    <li>剪切板历史</li>
+                    <li>Direct2D 硬件加速渲染</li>
+                </ul>
+            ]]></description>
+            <!--
+            <enclosure
+                url="https://github.com/samaidev/samime/releases/download/v1.0.0/samime-1.0.0.dmg"
+                sparkle:edSignature="需要用 sign_update 工具生成"
+                length="0"
+                type="application/octet-stream" />
+            -->
+        </item>
+    </channel>
+</rss>

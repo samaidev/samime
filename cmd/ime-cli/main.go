@@ -13,6 +13,7 @@ import (
         "github.com/zai/goime/internal/dict"
         "github.com/zai/goime/internal/engine"
         "github.com/zai/goime/internal/ibus"
+        "github.com/zai/goime/internal/updater"
 )
 
 func main() {
@@ -72,6 +73,8 @@ func main() {
                 runDemo(eng)
         case "service":
                 runService(eng)
+        case "update":
+                runUpdateCheck()
         default:
                 fmt.Fprintf(os.Stderr, "unknown mode: %s\n", *mode)
                 os.Exit(1)
@@ -237,4 +240,13 @@ func runService(eng *engine.Engine) {
         // Windows 上启动命名管道服务（见 internal/winime/pipe_windows.go）
         // Linux/macOS 上启动 TCP 服务（开发用）
         runServicePlatform(eng)
+}
+
+// runUpdateCheck 检查更新
+func runUpdateCheck() {
+        fmt.Printf("Samime %s (%s/%s)\n", updater.Version, "github.com/samaidev/samime", "v"+updater.Version)
+        fmt.Println("正在检查更新...")
+        fmt.Println()
+        checker := updater.New(updater.UpdateRepo, updater.Version)
+        fmt.Println(checker.CheckAndPrompt())
 }
