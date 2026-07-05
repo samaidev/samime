@@ -233,8 +233,16 @@ class CandidateWindow: NSWindow {
 
     func setSelected(_ idx: Int) {
         guard idx >= 0 && idx < candidates.count else { return }
-        tableView.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
-        tableView.scrollRowToVisible(idx)
+        // 用 NSAnimationContext 实现选中切换的平滑过渡
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.15  // 150ms 动画
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            tableView.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
+            tableView.scrollRowToVisible(idx)
+            // 触发重绘以应用动画
+            tableView.reloadData(forRowIndexes: IndexSet(integer: idx),
+                                  columnIndexes: IndexSet(integer: 0))
+        }, completionHandler: nil)
     }
 
     func selected() -> Int {

@@ -108,6 +108,7 @@ func NewDefault(d *dict.Dict) *Engine {
 
 // NewWithUserStore 创建带持久化用户词典的引擎
 // path 为空时使用默认路径 ~/.samime/userdict
+// 加载用户频次和上下文共现到内存
 func NewWithUserStore(d *dict.Dict, path string) (*Engine, error) {
         store, err := userdict.New(path)
         if err != nil {
@@ -117,6 +118,8 @@ func NewWithUserStore(d *dict.Dict, path string) (*Engine, error) {
         e.userStore = store
         // 加载已有用户频次到内存
         e.userFreq = store.All()
+        // 加载已有上下文共现到内存
+        e.contextPairs = store.AllContext()
         return e, nil
 }
 
@@ -605,15 +608,21 @@ func (e *Engine) prefixMatch(input string, out map[string]*Candidate) {
 // 综合考虑：
 //   - 拼音匹配度 + 词频（已在前面计算）
 //   - 用户频次（带时间衰减）
-//   - 上下文联想（前一个提交词与候选词的共现频次）
+//   - 2-gram 上下文联想（前一个提交词与候选词的共现频次）
+//   - 3-gram 上下文联想（前两个提交词与候选词的共现频次，权重更高）
 func (e *Engine) sortCandidates(in map[string]*Candidate) []Candidate {
         e.mu.RLock()
         defer e.mu.RUnlock()
 
-        // 获取上一个提交词（用于上下文联想）
+        // 获取上下文历史
         var lastWord string
-        if len(e.commitHistory) > 0 {
-                lastWord = e.commitHistory[len(e.commitHistory)-1]
+        var prevWord string
+        histLen := len(e.commitHistory)
+        if histLen >= 1 {
+                lastWord = e.commitHistory[histLen-1]
+        }
+        if histLen >= 2 {
+                prevWord = e.commitHistory[histLen-2]
         }
 
         result := make([]Candidate, 0, len(in))
@@ -624,16 +633,24 @@ func (e *Engine) sortCandidates(in map[string]*Candidate) []Candidate {
                         c.Score += uf * e.wUserFreq
                 }
 
-                // 2. 上下文联想加权：如果上一个词是 lastWord，且 (lastWord, c.Word) 共现过
+                // 2. 2-gram 上下文联想加权
                 if lastWord != "" && lastWord != c.Word {
                         ctxKey := lastWord + "|" + c.Word
                         if coFreq, ok := e.contextPairs[ctxKey]; ok && coFreq > 0 {
-                                // 共现频次越高，加权越大
                                 c.Score += coFreq * e.wContext
                         }
                 }
 
-                // 3. 重复提交加权：如果候选词与上一次提交相同
+                // 3. 3-gram 上下文联想加权（权重更高，因为更具体）
+                if prevWord != "" && lastWord != "" && lastWord != c.Word {
+                        ctxKey := prevWord + "\t" + lastWord + "|" + c.Word
+                        if coFreq, ok := e.contextPairs[ctxKey]; ok && coFreq > 0 {
+                                // 3-gram 权重是 2-gram 的 1.5 倍（更精确的上下文）
+                                c.Score += coFreq * e.wContext * 1.5
+                        }
+                }
+
+                // 4. 重复提交加权：如果候选词与上一次提交相同
                 if lastWord == c.Word {
                         c.Score += e.wContext * 0.5
                 }
@@ -686,7 +703,9 @@ func sourcePriority(s string) int {
 
 // Commit 用户选定了某个候选词，更新用户频次
 // - 时间衰减：旧频次按半衰期衰减后再 +1
-// - 上下文联想：记录 (上一个提交词, 当前词) 共现关系
+// - 2-gram 上下文：记录 (上一个词, 当前词) 共现
+// - 3-gram 上下文：记录 (前两个词, 当前词) 共现
+// - 持久化：用户频次和上下文都写入 BadgerDB
 func (e *Engine) Commit(word, py string) {
         e.mu.Lock()
         key := word + "|" + py
@@ -706,12 +725,29 @@ func (e *Engine) Commit(word, py string) {
         }
         e.userLastUsed[key] = now
 
-        // 上下文联想：记录上一个词 → 当前词的共现
-        if len(e.commitHistory) > 0 {
-                prev := e.commitHistory[len(e.commitHistory)-1]
-                if prev != word { // 不记录自连接
+        // 收集上下文更新（在锁外持久化）
+        var ctxUpdates []struct{ prev, cur string }
+        histLen := len(e.commitHistory)
+
+        // 2-gram: 上一个词 → 当前词
+        if histLen >= 1 {
+                prev := e.commitHistory[histLen-1]
+                if prev != word {
                         ctxKey := prev + "|" + word
                         e.contextPairs[ctxKey]++
+                        ctxUpdates = append(ctxUpdates, struct{ prev, cur string }{prev, word})
+                }
+        }
+
+        // 3-gram: 前两个词 → 当前词（用 "prev1\tprev2|cur" 作为键）
+        if histLen >= 2 {
+                prev1 := e.commitHistory[histLen-2]
+                prev2 := e.commitHistory[histLen-1]
+                if prev2 != word { // 不记录自连接
+                        ctxKey := prev1 + "\t" + prev2 + "|" + word
+                        e.contextPairs[ctxKey]++
+                        // 3-gram 也持久化（用 tab 分隔的 key）
+                        ctxUpdates = append(ctxUpdates, struct{ prev, cur string }{prev1 + "\t" + prev2, word})
                 }
         }
 
@@ -726,6 +762,13 @@ func (e *Engine) Commit(word, py string) {
         if store != nil {
                 if err := store.Incr(word, py); err != nil {
                         log.Printf("[engine] userdict.Incr failed: %v", err)
+                }
+                // 持久化上下文
+                for _, cu := range ctxUpdates {
+                        if err := store.IncrContext(cu.prev, cu.cur); err != nil {
+                                log.Printf("[engine] userdict.IncrContext failed: %v", err)
+                                break
+                        }
                 }
         }
 }

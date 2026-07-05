@@ -22,7 +22,8 @@ type Store struct {
         mu sync.RWMutex
 
         // 内存缓存（避免每次查询都读磁盘）
-        cache map[string]float64
+        cache        map[string]float64 // 用户频次: key "uf:word|pinyin"
+        contextCache map[string]float64 // 上下文共现: key "ctx:prev|cur"
 }
 
 // New 创建或打开用户词典
@@ -46,8 +47,9 @@ func New(path string) (*Store, error) {
                 return nil, fmt.Errorf("open badger: %w", err)
         }
         s := &Store{
-                db:    db,
-                cache: make(map[string]float64),
+                db:           db,
+                cache:        make(map[string]float64),
+                contextCache: make(map[string]float64),
         }
         // 加载缓存
         if err := s.loadCache(); err != nil {
@@ -65,9 +67,10 @@ func makeKey(word, py string) []byte {
         return []byte("uf:" + word + "|" + py)
 }
 
-// loadCache 加载所有用户频次到内存
+// loadCache 加载所有用户频次和上下文共现到内存
 func (s *Store) loadCache() error {
         return s.db.View(func(txn *badger.Txn) error {
+                // 加载用户频次 (uf: 前缀)
                 opts := badger.DefaultIteratorOptions
                 opts.Prefix = []byte("uf:")
                 it := txn.NewIterator(opts)
@@ -77,12 +80,33 @@ func (s *Store) loadCache() error {
                         err := item.Value(func(v []byte) error {
                                 freq, err := strconv.ParseFloat(string(v), 64)
                                 if err != nil {
-                                        return nil // 跳过坏数据
+                                        return nil
                                 }
                                 key := string(item.Key())
-                                // 去掉 "uf:" 前缀
                                 key = strings.TrimPrefix(key, "uf:")
                                 s.cache[key] = freq
+                                return nil
+                        })
+                        if err != nil {
+                                return err
+                        }
+                }
+
+                // 加载上下文共现 (ctx: 前缀)
+                opts2 := badger.DefaultIteratorOptions
+                opts2.Prefix = []byte("ctx:")
+                it2 := txn.NewIterator(opts2)
+                defer it2.Close()
+                for it2.Rewind(); it2.Valid(); it2.Next() {
+                        item := it2.Item()
+                        err := item.Value(func(v []byte) error {
+                                freq, err := strconv.ParseFloat(string(v), 64)
+                                if err != nil {
+                                        return nil
+                                }
+                                key := string(item.Key())
+                                key = strings.TrimPrefix(key, "ctx:")
+                                s.contextCache[key] = freq
                                 return nil
                         })
                         if err != nil {
@@ -136,12 +160,14 @@ func (s *Store) LoadBatch(m map[string]float64) {
         }
 }
 
-// Clear 清空用户词典
+// Clear 清空用户词典（包括上下文）
 func (s *Store) Clear() error {
         s.mu.Lock()
         defer s.mu.Unlock()
         s.cache = make(map[string]float64)
+        s.contextCache = make(map[string]float64)
         return s.db.Update(func(txn *badger.Txn) error {
+                // 删除 uf: 前缀
                 opts := badger.DefaultIteratorOptions
                 opts.Prefix = []byte("uf:")
                 it := txn.NewIterator(opts)
@@ -150,6 +176,14 @@ func (s *Store) Clear() error {
                 for it.Rewind(); it.Valid(); it.Next() {
                         keys = append(keys, it.Item().KeyCopy(nil))
                 }
+                // 删除 ctx: 前缀
+                opts2 := badger.DefaultIteratorOptions
+                opts2.Prefix = []byte("ctx:")
+                it2 := txn.NewIterator(opts2)
+                defer it2.Close()
+                for it2.Rewind(); it2.Valid(); it2.Next() {
+                        keys = append(keys, it2.Item().KeyCopy(nil))
+                }
                 for _, k := range keys {
                         if err := txn.Delete(k); err != nil {
                                 return err
@@ -157,6 +191,55 @@ func (s *Store) Clear() error {
                 }
                 return nil
         })
+}
+
+// === 上下文共现 API ===
+
+// makeContextKey 生成上下文存储键
+// 格式: "ctx:prev|cur"
+func makeContextKey(prev, cur string) []byte {
+        return []byte("ctx:" + prev + "|" + cur)
+}
+
+// IncrContext 增加上下文共现频次
+func (s *Store) IncrContext(prev, cur string) error {
+        s.mu.Lock()
+        defer s.mu.Unlock()
+        key := prev + "|" + cur
+        s.contextCache[key]++
+
+        val := strconv.FormatFloat(s.contextCache[key], 'f', -1, 64)
+        return s.db.Update(func(txn *badger.Txn) error {
+                e := badger.NewEntry(makeContextKey(prev, cur), []byte(val))
+                return txn.SetEntry(e)
+        })
+}
+
+// GetContext 获取上下文共现频次
+func (s *Store) GetContext(prev, cur string) float64 {
+        s.mu.RLock()
+        defer s.mu.RUnlock()
+        return s.contextCache[prev+"|"+cur]
+}
+
+// AllContext 返回所有上下文共现
+func (s *Store) AllContext() map[string]float64 {
+        s.mu.RLock()
+        defer s.mu.RUnlock()
+        out := make(map[string]float64, len(s.contextCache))
+        for k, v := range s.contextCache {
+                out[k] = v
+        }
+        return out
+}
+
+// LoadContextBatch 批量加载上下文
+func (s *Store) LoadContextBatch(m map[string]float64) {
+        s.mu.Lock()
+        defer s.mu.Unlock()
+        for k, v := range m {
+                s.contextCache[k] = v
+        }
 }
 
 // Close 关闭

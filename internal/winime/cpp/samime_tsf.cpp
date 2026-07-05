@@ -342,9 +342,49 @@ void CandidateWindow::setCandidates(const std::vector<Candidate>& cands, int sel
 
 void CandidateWindow::setSelectedIndex(int idx) {
     if (idx >= 0 && idx < (int)candidates_.size()) {
+        if (idx != selectedIdx_) {
+            // 启动选中切换动画
+            startSelectionAnimation(selectedIdx_, idx);
+        }
         selectedIdx_ = idx;
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
+}
+
+// === 选中切换动画 ===
+
+void CandidateWindow::startSelectionAnimation(int fromIdx, int toIdx) {
+    prevSelectedIndex_ = fromIdx;
+    animProgress_ = 0.0f;
+    animStartTime_ = GetTickCount();
+
+    // 停止之前的动画
+    stopAnimation();
+
+    // 启动定时器，每 16ms (~60fps) 触发一次
+    animTimer_ = SetTimer(hwnd_, 1, 16, nullptr);
+}
+
+void CandidateWindow::stopAnimation() {
+    if (animTimer_ != 0) {
+        KillTimer(hwnd_, animTimer_);
+        animTimer_ = 0;
+    }
+    animProgress_ = 1.0f;
+    prevSelectedIndex_ = -1;
+}
+
+void CandidateWindow::onAnimationTick() {
+    DWORD elapsed = GetTickCount() - animStartTime_;
+    if (elapsed >= ANIM_DURATION_MS) {
+        // 动画结束
+        stopAnimation();
+    } else {
+        // 计算进度（0.0 ~ 1.0），用 easeOutCubic 缓动函数
+        float t = (float)elapsed / (float)ANIM_DURATION_MS;
+        animProgress_ = 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);  // easeOutCubic
+    }
+    InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void CandidateWindow::setPosition(int x, int y) {
@@ -380,6 +420,12 @@ LRESULT CALLBACK CandidateWindow::wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM
         case WM_LBUTTONDOWN:
             self->onLButtonDown(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
             return 0;
+        case WM_TIMER:
+            if (wp == 1) {  // 动画定时器
+                self->onAnimationTick();
+                return 0;
+            }
+            break;
         case WM_ERASEBKGND:
             return 1;
     }
@@ -400,60 +446,76 @@ LRESULT CandidateWindow::onPaint(HWND hwnd) {
     HBITMAP memBmp = CreateCompatibleBitmap(hdc, width, height);
     HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, memBmp);
 
-    // === 现代化背景：浅灰色 + 圆角效果（用渐变模拟）===
-    // 主背景：白色
-    RECT bgRc = {0, 0, width, height};
-    FillRect(memDC, &bgRc, (HBRUSH)GetStockObject(WHITE_BRUSH));
-
-    // 顶部高光（模拟立体感）
-    RECT topRc = {0, 0, width, 2};
-    HBRUSH topBr = CreateSolidBrush(RGB(220, 230, 240));
-    FillRect(memDC, &topRc, topBr);
-    DeleteObject(topBr);
+    // === 现代化背景：渐变（模拟 Direct2D 风格）===
+    // 用 GDI GradientFill 画垂直渐变背景
+    TRIVERTEX vert[2];
+    vert[0].x = 0; vert[0].y = 0;
+    vert[0].Red = 0xFA00; vert[0].Green = 0xFB00; vert[0].Blue = 0xFC00; vert[0].Alpha = 0xFF00;
+    vert[1].x = width; vert[1].y = height;
+    vert[1].Red = 0xF000; vert[1].Green = 0xF400; vert[1].Blue = 0xF800; vert[1].Alpha = 0xFF00;
+    GRADIENT_RECT gRect = {0, 1};
+    GradientFill(memDC, vert, 2, &gRect, 1, GRADIENT_FILL_RECT_V);
 
     HFONT oldFont = (HFONT)SelectObject(memDC, font_);
     SetBkMode(memDC, TRANSPARENT);
 
-    // === 配色（现代 UI 风格）===
-    const COLORREF COLOR_SELECTED_BG = RGB(0, 120, 215);   // Windows 10 强调色
+    // === 配色（Direct2D 现代风格）===
+    const COLORREF COLOR_SELECTED_BG = RGB(0, 120, 215);   // Windows 10/11 强调色
     const COLORREF COLOR_SELECTED_FG = RGB(255, 255, 255);
-    const COLORREF COLOR_NORMAL_FG   = RGB(51, 51, 51);    // 深灰文字
-    const COLORREF COLOR_INDEX_FG    = RGB(180, 180, 180); // 序号浅灰
-    const COLORREF COLOR_PINYIN_FG   = RGB(140, 140, 140); // 拼音提示
-    const COLORREF COLOR_HOVER_BG    = RGB(240, 240, 240);
+    const COLORREF COLOR_NORMAL_FG   = RGB(51, 51, 51);
+    const COLORREF COLOR_PINYIN_FG   = RGB(140, 140, 140);
 
     int lineHeight = 28;
     int padding = 8;
+
+    // === 动画：选中项从旧位置过渡到新位置 ===
+    // 动画进行时，旧选中项逐渐淡出，新选中项逐渐出现
+    int animSelectedIdx = selectedIdx_;
+    int animPrevIdx = prevSelectedIndex_;
+    float progress = animProgress_;
+
     int y = padding;
-
-    // 计算序号徽章区域宽度
-    int indexWidth = 24;
-
     for (size_t i = 0; i < candidates_.size() && i < 9; i++) {
         RECT itemRc = {padding, y, width - padding, y + lineHeight};
 
-        // 选中项：圆角矩形 + 强调色
-        if ((int)i == selectedIdx_) {
-            // 用 RoundRect 画圆角矩形
-            HBRUSH br = CreateSolidBrush(COLOR_SELECTED_BG);
+        // 判断当前项的选中状态（含动画）
+        bool isCurrentSelected = ((int)i == animSelectedIdx);
+        bool isPrevSelected = ((int)i == animPrevIdx && animPrevIdx != animSelectedIdx);
+
+        // === 选中背景（带动画淡入淡出）===
+        if (isCurrentSelected || isPrevSelected) {
+            // 计算当前项的选中"程度"（0.0 ~ 1.0）
+            float selAmount = 0.0f;
+            if (isCurrentSelected) {
+                selAmount = progress;  // 新选中项：0 → 1
+            } else if (isPrevSelected) {
+                selAmount = 1.0f - progress;  // 旧选中项：1 → 0
+            }
+
+            // 颜色插值：从背景色到强调色
+            BYTE r = (BYTE)(0xFA + (GetRValue(COLOR_SELECTED_BG) - 0xFA) * selAmount);
+            BYTE g = (BYTE)(0xFB + (GetGValue(COLOR_SELECTED_BG) - 0xFB) * selAmount);
+            BYTE b = (BYTE)(0xFC + (GetBValue(COLOR_SELECTED_BG) - 0xFC) * selAmount);
+
+            HBRUSH br = CreateSolidBrush(RGB(r, g, b));
             HPEN oldPen = (HPEN)SelectObject(memDC, GetStockObject(NULL_PEN));
             HBRUSH oldBr = (HBRUSH)SelectObject(memDC, br);
+            // 圆角矩形
             RoundRect(memDC, itemRc.left, itemRc.top, itemRc.right, itemRc.bottom, 6, 6);
             SelectObject(memDC, oldPen);
             SelectObject(memDC, oldBr);
             DeleteObject(br);
-            SetTextColor(memDC, COLOR_SELECTED_FG);
-        } else {
-            // 普通项：可选悬停色（这里用静态）
-            SetTextColor(memDC, COLOR_NORMAL_FG);
         }
 
-        // 序号徽章（圆形数字 1-9）
+        // === 序号徽章 ===
         RECT indexRc = {itemRc.left + 4, itemRc.top + 4,
                         itemRc.left + 4 + 20, itemRc.top + 4 + 20};
-        if ((int)i == selectedIdx_) {
-            // 选中时序号背景透明，文字白色
-            SetTextColor(memDC, RGB(255, 255, 255));
+        if (isCurrentSelected && progress > 0.5f) {
+            // 选中时序号文字白色
+            SetTextColor(memDC, COLOR_SELECTED_FG);
+        } else if (isCurrentSelected) {
+            // 过渡中：浅色
+            SetTextColor(memDC, RGB(180, 200, 230));
         } else {
             // 普通时序号浅灰背景圆
             HBRUSH indexBr = CreateSolidBrush(RGB(240, 240, 240));
@@ -465,33 +527,33 @@ LRESULT CandidateWindow::onPaint(HWND hwnd) {
             DeleteObject(indexBr);
             SetTextColor(memDC, RGB(120, 120, 120));
         }
-        // 居中绘制序号
         std::wstring idxText = std::to_wstring(i + 1);
         DrawText(memDC, idxText.c_str(), (int)idxText.size(), &indexRc,
                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-        // 候选词文字
-        if ((int)i == selectedIdx_) {
+        // === 候选词文字 ===
+        if (isCurrentSelected && progress > 0.5f) {
             SetTextColor(memDC, COLOR_SELECTED_FG);
+        } else if (isCurrentSelected) {
+            SetTextColor(memDC, RGB(80, 80, 80));
         } else {
             SetTextColor(memDC, COLOR_NORMAL_FG);
         }
-        RECT wordRc = {itemRc.left + indexWidth + 4, itemRc.top,
+        RECT wordRc = {itemRc.left + 28, itemRc.top,
                        itemRc.right - 4, itemRc.bottom};
         std::wstring word = candidates_[i].word;
         DrawText(memDC, word.c_str(), (int)word.size(), &wordRc,
                  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-        // 拼音提示（右对齐，浅色）
-        if ((int)i != selectedIdx_ && !candidates_[i].pinyin.empty()) {
+        // === 拼音提示（右对齐，浅色）===
+        if (!(isCurrentSelected && progress > 0.5f) && !candidates_[i].pinyin.empty()) {
             SetTextColor(memDC, COLOR_PINYIN_FG);
-            // 用更小字体画拼音
             HFONT smallFont = CreateFont(12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                           DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                                           CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                                           DEFAULT_PITCH | FF_DONTCARE, _T("Microsoft YaHei"));
             HFONT prevFont = (HFONT)SelectObject(memDC, smallFont);
-            RECT pyRc = {itemRc.left + indexWidth + 4, itemRc.top,
+            RECT pyRc = {itemRc.left + 28, itemRc.top,
                          itemRc.right - 4, itemRc.bottom};
             std::wstring py = candidates_[i].pinyin;
             DrawText(memDC, py.c_str(), (int)py.size(), &pyRc,

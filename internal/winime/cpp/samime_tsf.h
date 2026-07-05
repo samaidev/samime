@@ -110,6 +110,7 @@ private:
     static LRESULT CALLBACK wndProc(HWND, UINT, WPARAM, LPARAM);
     LRESULT onPaint(HWND hwnd);
     void onLButtonDown(int x, int y);
+    void onAnimationTick();  // 动画定时器回调
 
     HWND hwnd_ = nullptr;
     int x_ = 0, y_ = 0;
@@ -117,9 +118,22 @@ private:
     std::vector<Candidate> candidates_;
     HFONT font_ = nullptr;
 
+    // === 动画状态 ===
+    // 选中项切换时的过渡动画
+    int prevSelectedIndex_ = -1;      // 上一次的选中项
+    float animProgress_ = 1.0f;       // 动画进度 0.0 ~ 1.0
+    UINT_PTR animTimer_ = 0;          // 动画定时器 ID
+    DWORD animStartTime_ = 0;         // 动画开始时间
+    static const int ANIM_DURATION_MS = 150;  // 动画持续时间
+
     static const TCHAR* const CLASS_NAME;
     static ATOM classAtom_;
     static ATOM registerClass();
+
+    // 启动选中切换动画
+    void startSelectionAnimation(int fromIdx, int toIdx);
+    // 停止动画
+    void stopAnimation();
 };
 
 // === 主 TextService 实现 ===
