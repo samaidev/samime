@@ -406,6 +406,22 @@ func (ie *IBusEngine) ProcessKeyEvent(keyval, keycode, state uint32) (bool, *dbu
                 return false, nil
         }
 
+        // 方向键：候选窗隐藏后 ibus 不再路由 CursorUp/CursorDown，
+        // 这里自己捕获 Up/Down 实现展开/折叠/翻页。
+        // 只在无修饰键（纯 Up/Down）时处理，Shift/Ctrl+方向键透传给应用。
+        // GDK_KEY_Up = 65362, GDK_KEY_Down = 65364
+        if ie.preedit != "" && len(ie.cands) > 0 &&
+                (state&0x0001) == 0 && (state&0x0004) == 0 && (state&0x0008) == 0 {
+                if keyval == 65362 { // Up
+                        ie.cursorUpInternal()
+                        return true, nil
+                }
+                if keyval == 65364 { // Down
+                        ie.cursorDownInternal()
+                        return true, nil
+                }
+        }
+
         // 标点符号智能转换：有 preedit 时先提交候选词，再输出标点。
         // 关键：合并成一次 commit（候选词+标点），避免两次 CommitText 信号
         // 被 ibus 合并/丢失。先清 preedit 状态再 commit，确保信号顺序正确。
@@ -586,8 +602,14 @@ func (ie *IBusEngine) PageDown() *dbus.Error {
 func (ie *IBusEngine) CursorUp() *dbus.Error {
 	ie.mu.Lock()
 	defer ie.mu.Unlock()
+	ie.cursorUpInternal()
+	return nil
+}
+// cursorUpInternal 上方向键：第一页折叠，其他页翻页
+// 调用方负责持锁
+func (ie *IBusEngine) cursorUpInternal() {
 	if len(ie.cands) == 0 {
-		return nil
+		return
 	}
 	// 在第一页时按上 = 折叠
 	if ie.pageOffset == 0 {
@@ -601,15 +623,19 @@ func (ie *IBusEngine) CursorUp() *dbus.Error {
 		log.Printf("[ibus] CursorUp -> pageOffset=%d", ie.pageOffset)
 	}
 	ie.emitSignals()
-	return nil
 }
 func (ie *IBusEngine) CursorDown() *dbus.Error {
 	ie.mu.Lock()
 	defer ie.mu.Unlock()
+	ie.cursorDownInternal()
+	return nil
+}
+// cursorDownInternal 下方向键：展开 + 翻页（最后一页循环回第一页）
+// 调用方负责持锁
+func (ie *IBusEngine) cursorDownInternal() {
 	if len(ie.cands) == 0 {
-		return nil
+		return
 	}
-	// 下方向键 = 展开（如果折叠则展开，如果在最后一页则循环）
 	ie.expanded = true
 	total := len(ie.cands)
 	if ie.pageOffset+pageSize < total {
@@ -619,7 +645,6 @@ func (ie *IBusEngine) CursorDown() *dbus.Error {
 	}
 	log.Printf("[ibus] CursorDown -> expanded=%v pageOffset=%d", ie.expanded, ie.pageOffset)
 	ie.emitSignals()
-	return nil
 }
 
 // CandidateClicked 候选词被点击
@@ -770,13 +795,12 @@ func (ie *IBusEngine) emitSignals() {
 	}
 
 	// UpdateLookupTable 信号签名: (vb) —— IBusLookupTable variant, visible
-	if len(ie.cands) > 0 {
-		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.UpdateLookupTable",
-			ie.makeLookupTableVariant(), true)
-		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.ShowLookupTable")
-	} else {
-		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.HideLookupTable")
-	}
+	//
+	// 完全隐藏 ibus 自带的候选窗（GNOME Shell 强制竖排，没法改成横排）。
+	// 候选词改由上面的 UpdateAuxiliaryText 横向显示。
+	// 方向键导航改由 ProcessKeyEvent 自己捕获（见 ProcessKeyEvent 里的
+	// GDK_KEY_Up/Down 处理），不再依赖 ibus 候选窗的 CursorUp/Down。
+	ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.HideLookupTable")
 }
 
 // makeLookupTableVariant 构造 IBusLookupTable 的 variant。
