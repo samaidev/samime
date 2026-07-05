@@ -489,12 +489,12 @@ func (ie *IBusEngine) commitCandidate(idx int) bool {
 func makeIBusText(text string) interface{} {
 	return struct {
 		Name        string
-		Attachments []map[string]dbus.Variant
+		Attachments map[string]dbus.Variant
 		Text        string
 		Attrs       dbus.Variant
 	}{
 		Name:        "IBusText",
-		Attachments: []map[string]dbus.Variant{},
+		Attachments: map[string]dbus.Variant{},
 		Text:        text,
 		Attrs:       dbus.MakeVariant(makeEmptyIBusAttrList()),
 	}
@@ -505,11 +505,11 @@ func makeIBusText(text string) interface{} {
 func makeEmptyIBusAttrList() interface{} {
 	return struct {
 		Name        string
-		Attachments []map[string]dbus.Variant
+		Attachments map[string]dbus.Variant
 		Attrs       []dbus.Variant
 	}{
 		Name:        "IBusAttrList",
-		Attachments: []map[string]dbus.Variant{},
+		Attachments: map[string]dbus.Variant{},
 		Attrs:       []dbus.Variant{},
 	}
 }
@@ -525,6 +525,11 @@ func (ie *IBusEngine) commitText(text string) {
 	if ie.conn == nil {
 		return
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[ibus] PANIC in commitText: %v", r)
+		}
+	}()
 	ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.CommitText",
 		makeIBusTextVariant(text))
 }
@@ -541,6 +546,11 @@ func (ie *IBusEngine) emitSignals() {
 	if ie.conn == nil {
 		return
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[ibus] PANIC in emitSignals: %v", r)
+		}
+	}()
 
 	if ie.preedit == "" {
 		// 清空预编辑
@@ -586,15 +596,15 @@ func (ie *IBusEngine) emitSignals() {
 // 见 src/ibuslookuptable.c::ibus_lookup_table_serialize。
 func makeLookupTableVariant(cands []engine.Candidate) dbus.Variant {
 	type lookupTable struct {
-		Name           string
-		Attachments    []map[string]dbus.Variant
-		PageSize       uint32
-		CursorPos      uint32
-		CursorVisible  bool
-		Round          bool
-		Orientation    int32
-		Candidates     []dbus.Variant
-		Labels         []dbus.Variant
+		Name          string
+		Attachments   map[string]dbus.Variant
+		PageSize      uint32
+		CursorPos     uint32
+		CursorVisible bool
+		Round         bool
+		Orientation   int32
+		Candidates    []dbus.Variant
+		Labels        []dbus.Variant
 	}
 
 	n := len(cands)
@@ -614,7 +624,7 @@ func makeLookupTableVariant(cands []engine.Candidate) dbus.Variant {
 
 	tbl := lookupTable{
 		Name:          "IBusLookupTable",
-		Attachments:   []map[string]dbus.Variant{},
+		Attachments:   map[string]dbus.Variant{},
 		PageSize:      9,
 		CursorPos:     0,
 		CursorVisible: true,
