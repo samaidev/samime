@@ -12,3 +12,12 @@ go.work.sum
 vendor/
 .idea/
 .vscode/
+
+# Packaging build artifacts
+packaging/*/stage/
+packaging/linux/*.deb
+packaging/linux/*.rpm
+packaging/linux/*.AppImage
+packaging/windows/*.exe
+packaging/macos/*.dmg
+dist/
