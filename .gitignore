@@ -1,0 +1,14 @@
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+go.work
+go.work.sum
+.env
+*.log
+vendor/
+.idea/
+.vscode/
