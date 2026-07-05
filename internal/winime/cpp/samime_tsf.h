@@ -20,6 +20,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <winuser.h>
 #include <tchar.h>
 #include <ole2.h>
 #include <olectl.h>

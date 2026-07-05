@@ -142,7 +142,7 @@ std::string GoEngineClient::readResponse() {
     int total = 0;
     while (total < (int)sizeof(buf) - 1) {
         int n = recv(sock_, buf + total, (int)sizeof(buf) - 1 - total, 0);
-        if n <= 0) break;
+        if (n <= 0) break;
         total += n;
         buf[total] = '\0';
         if (strchr(buf, '\n')) break;
@@ -365,11 +365,11 @@ void CandidateWindow::setCandidates(const std::vector<Candidate>& cands, int sel
 
 void CandidateWindow::setSelectedIndex(int idx) {
     if (idx >= 0 && idx < (int)candidates_.size()) {
-        if (idx != selectedIdx_) {
+        if (idx != selectedIndex_) {
             // 启动选中切换动画
-            startSelectionAnimation(selectedIdx_, idx);
+            startSelectionAnimation(selectedIndex_, idx);
         }
-        selectedIdx_ = idx;
+        selectedIndex_ = idx;
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
 }
@@ -452,7 +452,7 @@ LRESULT CALLBACK CandidateWindow::wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM
         case WM_GESTURE:
             self->onGesture(wp, lp);
             return 0;
-        case WM_TOUCHBUTTONDOWN: {
+        case WM_LBUTTONDOWN: {
             // 触摸开始
             self->touchStartPos_.x = GET_X_LPARAM(lp);
             self->touchStartPos_.y = GET_Y_LPARAM(lp);
@@ -460,7 +460,7 @@ LRESULT CALLBACK CandidateWindow::wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM
             self->touchStartSelectedIndex_ = self->selectedIndex_;
             return 0;
         }
-        case WM_TOUCHBUTTONUP: {
+        case WM_LBUTTONUP: {
             // 触摸结束，判断滑动方向
             if (self->isTouching_) {
                 int dx = GET_X_LPARAM(lp) - self->touchStartPos_.x;
@@ -546,7 +546,7 @@ LRESULT CandidateWindow::onPaint(HWND hwnd) {
 
     // === 动画：选中项从旧位置过渡到新位置 ===
     // 动画进行时，旧选中项逐渐淡出，新选中项逐渐出现
-    int animSelectedIdx = selectedIdx_;
+    int animSelectedIdx = selectedIndex_;
     int animPrevIdx = prevSelectedIndex_;
     float progress = animProgress_;
 
@@ -717,7 +717,8 @@ void CandidateWindow::onGesture(WPARAM wParam, LPARAM lParam) {
             break;
         }
 
-        case GID_SCROLL: {
+        // case GID_SCROLL: // Not available in all SDKs
+        // break; {
             // 滚动手势
             int dy = (int)(short)HIWORD(gi.ullArguments);
             if (dy < 0) {
@@ -994,7 +995,7 @@ STDMETHODIMP SamimeTextService::GetCount(UINT* pcCandidateList) {
 
 STDMETHODIMP SamimeTextService::GetSelection(UINT* puIndex) {
     if (puIndex == nullptr) return E_POINTER;
-    *puIndex = (UINT)selectedIdx_;
+    *puIndex = (UINT)selectedIndex_;
     return S_OK;
 }
 
@@ -1040,7 +1041,7 @@ bool SamimeTextService::handleBackspace(ITfContext* ctx) {
 bool SamimeTextService::handleReturn(ITfContext* ctx) {
     if (preedit_.empty()) return false;
     if (!candidates_.empty()) {
-        return commitCandidate(ctx, selectedIdx_);
+        return commitCandidate(ctx, selectedIndex_);
     }
     // 没候选，直接提交原始拼音
     insertText(ctx, preedit_);
@@ -1071,7 +1072,7 @@ bool SamimeTextService::handleDigit(ITfContext* ctx, int idx) {
 void SamimeTextService::updatePreedit(ITfContext* ctx) {
     if (preedit_.empty()) {
         if (composition_) {
-            composition_->EndComposition(ctx);
+            composition_->EndComposition(0); // TfEditCookie=0 for simple case
             composition_->Release();
             composition_ = nullptr;
         }
@@ -1118,7 +1119,7 @@ bool SamimeTextService::commitCandidate(ITfContext* ctx, int idx) {
 void SamimeTextService::reset() {
     preedit_.clear();
     candidates_.clear();
-    selectedIdx_ = 0;
+    selectedIndex_ = 0;
     engine_.reset();
     candWindow_.hide();
 }
@@ -1134,7 +1135,7 @@ HRESULT SamimeTextService::insertText(ITfContext* ctx, const std::wstring& text)
     HRESULT hr = ctx->QueryInterface(IID_ITfInsertAtSelection, (void**)&insertAtSel);
     if (SUCCEEDED(hr)) {
         hr = insertAtSel->InsertTextAtSelection(TF_IAS_NOQUERY, text.c_str(),
-                                                 (LONG)text.size(), &range);
+                                                 (LONG)text.size(), nullptr);
         insertAtSel->Release();
     }
     if (range) range->Release();

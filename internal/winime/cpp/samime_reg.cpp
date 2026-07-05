@@ -5,6 +5,7 @@
 #include <tchar.h>
 #include "samime_tsf.h"
 #include <strsafe.h>
+#include <shlwapi.h>
 
 namespace samime {
 
