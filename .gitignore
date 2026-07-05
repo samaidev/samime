@@ -21,3 +21,6 @@ packaging/linux/*.AppImage
 packaging/windows/*.exe
 packaging/macos/*.dmg
 dist/
+
+# 允许预编译 DLL
+!internal/winime/prebuilt/*.dll
