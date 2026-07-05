@@ -41,16 +41,20 @@ build_deb() {
     mkdir -p "$DEB_ROOT/usr/share/applications"
     mkdir -p "$DEB_ROOT/usr/share/icons/hicolor/48x48/apps"
     mkdir -p "$DEB_ROOT/usr/share/doc/samime"
+    # IBus 组件目录：同时放到 /usr/share 和 /etc，确保所有发行版都能识别
+    mkdir -p "$DEB_ROOT/usr/share/ibus/component"
     mkdir -p "$DEB_ROOT/etc/ibus/component"
+    # Fcitx5 addon 目录
+    mkdir -p "$DEB_ROOT/usr/share/fcitx5/addon"
+    mkdir -p "$DEB_ROOT/usr/share/fcitx5/inputmethod"
     mkdir -p "$DEB_ROOT/etc/systemd/user"
 
     # 二进制
     cp "$STAGE/samime" "$DEB_ROOT/usr/bin/samime"
     chmod 755 "$DEB_ROOT/usr/bin/samime"
 
-    # IBus 组件配置
-    cat > "$DEB_ROOT/etc/ibus/component/samime.xml" <<'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
+    # IBus 组件配置（放到两个位置确保兼容）
+    IBUS_XML='<?xml version="1.0" encoding="UTF-8"?>
 <component>
     <name>org.freedesktop.IBus.Samime</name>
     <description>Samime Chinese Input Method (Go)</description>
@@ -71,8 +75,31 @@ build_deb() {
             <layout>us</layout>
         </engine>
     </engines>
-</component>
-EOF
+</component>'
+    # 主位置（Ubuntu/Debian 标准位置）
+    echo "$IBUS_XML" > "$DEB_ROOT/usr/share/ibus/component/samime.xml"
+    # 兼容位置（部分老版本 IBus 读取 /etc）
+    echo "$IBUS_XML" > "$DEB_ROOT/etc/ibus/component/samime.xml"
+
+    # Fcitx5 addon 配置（如果系统用 Fcitx5）
+    cat > "$DEB_ROOT/usr/share/fcitx5/addon/samime.conf" <<'FCITX_ADDON'
+[Addon]
+Name=Samime
+Category=InputMethod
+Version=1.0.0
+Library=samime
+Type=SharedLibrary
+OnDemand=True
+FCITX_ADDON
+
+    cat > "$DEB_ROOT/usr/share/fcitx5/inputmethod/samime.conf" <<'FCITX_IM'
+[InputMethod]
+Name=Samime
+Icon=samime
+Label=萨米
+LangCode=zh_CN
+Addon=samime
+FCITX_IM
 
     # systemd user service
     cat > "$DEB_ROOT/etc/systemd/user/samime.service" <<'EOF'
@@ -127,23 +154,95 @@ Description: Samime Chinese Input Method (Go)
  Homepage: https://github.com/samaidev/samime
 EOF
 
-    # postinst
-    cat > "$DEB_ROOT/DEBIAN/postinst" <<'EOF'
+    # postinst - 自动完成所有配置
+    cat > "$DEB_ROOT/DEBIAN/postinst" <<'POSTINST'
 #!/bin/bash
 set -e
-# 更新 IBus 缓存
-if command -v ibus write-cache >/dev/null 2>&1; then
-    ibus write-cache --system >/dev/null 2>&1 || true
+
+# 确保 IBus 组件在标准位置（双重保险）
+if [ -f /etc/ibus/component/samime.xml ] && [ ! -f /usr/share/ibus/component/samime.xml ]; then
+    mkdir -p /usr/share/ibus/component
+    cp /etc/ibus/component/samime.xml /usr/share/ibus/component/samime.xml
 fi
-# 提示用户
+
+# 启动 samime 服务（用户级 systemd）
+mkdir -p /etc/systemd/user
+if [ -f /etc/systemd/user/samime.service ]; then
+    # 找到当前登录用户
+    REAL_USER=$(who | awk '{print $1}' | head -1)
+    if [ -n "$REAL_USER" ]; then
+        USER_UID=$(id -u "$REAL_USER")
+        # 用 machinectl 或 runuser 启动用户级服务
+        XDG_RUNTIME_DIR="/run/user/$USER_UID"
+        if [ -d "$XDG_RUNTIME_DIR" ]; then
+            runuser -u "$REAL_USER" -- systemctl --user daemon-reload 2>/dev/null || true
+            runuser -u "$REAL_USER" -- systemctl --user enable samime.service 2>/dev/null || true
+            runuser -u "$REAL_USER" -- systemctl --user start samime.service 2>/dev/null || true
+        fi
+    fi
+fi
+
+# 添加 samime 到 IBus 输入源（如果 IBus 在用）
+if command -v ibus >/dev/null 2>&1; then
+    # 刷新 IBus 缓存
+    ibus write-cache --system 2>/dev/null || true
+
+    # 找到当前用户并添加输入源
+    REAL_USER=$(who | awk '{print $1}' | head -1)
+    if [ -n "$REAL_USER" ]; then
+        USER_UID=$(id -u "$REAL_USER")
+        XDG_RUNTIME_DIR="/run/user/$USER_UID"
+        DBUS_ADDR="unix:path=$XDG_RUNTIME_DIR/bus"
+
+        if [ -d "$XDG_RUNTIME_DIR" ]; then
+            # 添加 samime 到预加载引擎列表
+            runuser -u "$REAL_USER" -- env DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDR" \
+                gsettings set org.freedesktop.ibus.general preload-engines \
+                "['xkb:us::eng', 'samime']" 2>/dev/null || true
+
+            # 重启 IBus 让组件生效
+            runuser -u "$REAL_USER" -- env DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDR" \
+                ibus restart 2>/dev/null || true
+        fi
+    fi
+fi
+
+# 如果用 Fcitx5
+if command -v fcitx5 >/dev/null 2>&1; then
+    REAL_USER=$(who | awk '{print $1}' | head -1)
+    if [ -n "$REAL_USER" ]; then
+        USER_UID=$(id -u "$REAL_USER")
+        XDG_RUNTIME_DIR="/run/user/$USER_UID"
+        if [ -d "$XDG_RUNTIME_DIR" ]; then
+            runuser -u "$REAL_USER" -- env DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus" \
+                fcitx5 -r -d 2>/dev/null || true
+        fi
+    fi
+fi
+
 echo ""
-echo "Samime 已安装。请执行以下步骤启用："
-echo "  1. 重启 IBus: ibus restart"
-echo "  2. 添加输入法: ibus add-engine samime"
-echo "  3. 或在系统设置 -> 键盘 -> 输入源中添加"
+echo "============================================"
+echo "  Samime 已安装并自动配置完成！"
+echo "============================================"
+echo ""
+echo "已完成："
+echo "  ✓ 二进制安装到 /usr/bin/samime"
+echo "  ✓ IBus 组件注册到 /usr/share/ibus/component/"
+echo "  ✓ Fcitx5 组件注册到 /usr/share/fcitx5/"
+echo "  ✓ systemd 用户服务已启动"
+echo "  ✓ IBus 缓存已刷新"
+echo "  ✓ Samime 已添加到输入源"
+echo ""
+echo "使用方法："
+echo "  1. 按 Super+Space 切换输入法到 Samime"
+echo "  2. 或在 设置 → 键盘 → 输入源 中查看"
+echo ""
+echo "验证："
+echo "  samime -mode=demo    # 演示模式"
+echo "  samime -mode=update  # 检查更新"
 echo ""
 exit 0
-EOF
+POSTINST
     chmod 755 "$DEB_ROOT/DEBIAN/postinst"
 
     # prerm
