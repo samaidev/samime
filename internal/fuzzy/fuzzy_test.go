@@ -50,10 +50,11 @@ func TestExpandZhong(t *testing.T) {
 func TestExpandAll(t *testing.T) {
         e := New()
         results := e.ExpandAll([]string{"ni", "hao"})
-        // ni -> [ni, li] (n/l 模糊), hao -> [hao]
-        // 笛卡尔积 = 2 * 1 = 2
-        if len(results) != 2 {
-                t.Errorf("ExpandAll([ni hao]) got %d results, want 2: %v", len(results), results)
+        // ni -> [ni, li] (n/l 模糊)
+        // hao -> [hao, fao, kao] (h/f, h/k 模糊)
+        // 笛卡尔积 = 2 * 3 = 6
+        if len(results) != 6 {
+                t.Errorf("ExpandAll([ni hao]) got %d results, want 6: %v", len(results), results)
         }
         // 应包含 nihao 和 lihao
         hasNihao, hasLihao := false, false

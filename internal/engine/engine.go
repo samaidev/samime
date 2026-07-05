@@ -127,6 +127,35 @@ func (e *Engine) Search(input string) []Candidate {
         // 切分音节
         syls := pinyin.Segment(input)
         if len(syls) == 0 {
+                // 切分失败：尝试特殊匹配模式
+                candMap := make(map[string]*Candidate)
+
+                // 模式 1: 单声母联想（输入 "n"/"w"/"z" 等纯声母时）
+                if pinyin.IsInitial(input) {
+                        e.singleInitialMatch(input, candMap)
+                        result := e.sortCandidates(candMap)
+                        if len(result) > 50 {
+                                result = result[:50]
+                        }
+                        return result
+                }
+
+                // 模式 2: 首字母缩写（输入 "nh"/"zg" 等多声母组合时）
+                // 检查每个字符是否都是合法声母
+                if len(input) >= 2 && len(input) <= 6 && isAllInitials(input) {
+                        // 构造伪音节
+                        pseudoSyls := make([]pinyin.Syllable, len(input))
+                        for i, c := range input {
+                                pseudoSyls[i] = pinyin.Syllable{Initial: string(c), Final: "", Raw: string(c)}
+                        }
+                        e.acronymMatch(pseudoSyls, candMap)
+                        result := e.sortCandidates(candMap)
+                        if len(result) > 50 {
+                                result = result[:50]
+                        }
+                        return result
+                }
+
                 return nil
         }
 
@@ -141,15 +170,30 @@ func (e *Engine) Search(input string) []Candidate {
                 e.segmentMatch(syls, candMap)
         }
 
+        // 1.6 首字母缩写联想（多音节短输入）
+        if len(syls) >= 2 && len(input) <= 6 {
+                e.acronymMatch(syls, candMap)
+        }
+
         // 2. 模糊音匹配
         e.fuzzyMatch(syls, candMap)
 
         // 3. 拼写错误容错
         e.typoMatch(input, syls, candMap)
 
+        // 3.5 声母遗漏容错（仅对单韵母输入）
+        if len(syls) == 1 && pinyin.IsFinal(syls[0].Raw) {
+                e.missingInitialMatch(syls[0].Raw, candMap)
+        }
+
         // 4. 前缀匹配（输入过程中）
         if len(candMap) < 10 {
                 e.prefixMatch(input, candMap)
+        }
+
+        // 4.5 单声母联想：输入 "n" 等单声母时返回高频字
+        if len(syls) == 1 && pinyin.IsInitial(syls[0].Raw) && len(candMap) < 5 {
+                e.singleInitialMatch(syls[0].Raw, candMap)
         }
 
         // 5. 排序
@@ -250,6 +294,194 @@ func (e *Engine) segmentMatch(syls []pinyin.Syllable, out map[string]*Candidate)
                         Pinyin: py,
                         Score:  baseScore,
                         Source: "segment",
+                }
+        }
+}
+
+// isAllInitials 检查字符串每个字符是否都是合法声母（单字符）
+func isAllInitials(s string) bool {
+        if len(s) == 0 {
+                return false
+        }
+        for _, c := range s {
+                if !pinyin.IsInitial(string(c)) {
+                        return false
+                }
+        }
+        return true
+}
+
+// acronymMatch 首字母缩写联想
+// 输入 "nh" → 联想 "你好"（n+h 首字母缩写）
+// 输入 "zg" → 联想 "中国"
+// 策略：把每个音节的声母作为缩写，匹配词典中以这些声母开头的多字词
+func (e *Engine) acronymMatch(syls []pinyin.Syllable, out map[string]*Candidate) {
+        // 只对每个音节都是单字母（即纯声母）的情况生效
+        for _, s := range syls {
+                if len(s.Raw) != 1 || !pinyin.IsInitial(s.Raw) {
+                        return // 不是首字母缩写模式
+                }
+        }
+
+        // 收集所有声母
+        initials := make([]string, len(syls))
+        for i, s := range syls {
+                initials[i] = s.Raw
+        }
+
+        // 在词典中查找以这些声母开头的多字词
+        firstInitial := initials[0]
+        candidates := e.dict.LookupPrefix(firstInitial)
+
+        // 收集所有匹配的候选（不提前截断，最后按词频排序取 Top N）
+        type cand struct {
+                Word string
+                Pinyin string
+                Freq float64
+        }
+        var matched []cand
+
+        for _, py := range candidates {
+                // 检查这个拼音的首字母序列是否匹配
+                pySyls := pinyin.Segment(py)
+                if len(pySyls) != len(initials) {
+                        continue
+                }
+                ok := true
+                for i, s := range pySyls {
+                        if s.Initial != initials[i] {
+                                ok = false
+                                break
+                        }
+                }
+                if !ok {
+                        continue
+                }
+                // 匹配，取这个词的所有候选
+                entries := e.dict.Lookup(py)
+                for i, ent := range entries {
+                        if i >= 3 {
+                                break // 每个拼音只取前 3 个
+                        }
+                        // 词的汉字数应该等于声母数
+                        if len([]rune(ent.Word)) != len(initials) {
+                                continue
+                        }
+                        matched = append(matched, cand{ent.Word, ent.Pinyin, ent.Freq})
+                }
+        }
+
+        // 按词频降序排序
+        sort.Slice(matched, func(i, j int) bool {
+                return matched[i].Freq > matched[j].Freq
+        })
+
+        // 取前 10 个加入候选
+        count := 0
+        for _, c := range matched {
+                if count >= 10 {
+                        break
+                }
+                key := c.Word + "|" + c.Pinyin
+                if _, exists := out[key]; !exists {
+                        score := e.wPinyinMatch*0.4 + c.Freq*e.wFreq*0.3
+                        out[key] = &Candidate{
+                                Word:   c.Word,
+                                Pinyin: c.Pinyin,
+                                Score:  score,
+                                Source: "acronym",
+                        }
+                        count++
+                }
+        }
+}
+
+// missingInitialMatch 声母遗漏容错
+// 用户输入纯韵母 "ao" 时，联想 "hao"(好)、"nao"(闹)、"gao"(高) 等
+func (e *Engine) missingInitialMatch(final string, out map[string]*Candidate) {
+        // 枚举所有声母 + 该韵母的组合
+        allInitials := []string{"b", "p", "m", "f", "d", "t", "n", "l",
+                "g", "k", "h", "j", "q", "x", "r", "z", "c", "s",
+                "zh", "ch", "sh", "y", "w"}
+        for _, ini := range allInitials {
+                combined := ini + final
+                // 必须是合法音节
+                if !pinyin.IsValidSyllable(combined) {
+                        continue
+                }
+                entries := e.dict.Lookup(combined)
+                for i, ent := range entries {
+                        if i >= 2 {
+                                break
+                        }
+                        key := ent.Word + "|" + ent.Pinyin
+                        if _, exists := out[key]; !exists {
+                                // 声母遗漏容错分数较低
+                                score := (e.wPinyinMatch + ent.Freq*e.wFreq) * 0.4 * e.wTypo
+                                out[key] = &Candidate{
+                                        Word:   ent.Word,
+                                        Pinyin: ent.Pinyin,
+                                        Score:  score,
+                                        Source: "missing-initial",
+                                }
+                        }
+                }
+        }
+}
+
+// singleInitialMatch 单声母联想
+// 输入 "n" 等单声母时，返回以该声母开头的高频字
+func (e *Engine) singleInitialMatch(initial string, out map[string]*Candidate) {
+        // 找所有以该声母开头的拼音
+        candidates := e.dict.LookupPrefix(initial)
+
+        type entry struct {
+                Word   string
+                Pinyin string
+                Freq   float64
+        }
+        var allEntries []entry
+
+        for _, py := range candidates {
+                // 只取拼音正好是 声母+韵母 的（即完整音节）
+                if !pinyin.IsValidSyllable(py) {
+                        continue
+                }
+                entries := e.dict.Lookup(py)
+                for i, ent := range entries {
+                        if i >= 1 {
+                                break // 每个拼音只取最高频
+                        }
+                        // 只取单字（汉字数 == 1）
+                        if len([]rune(ent.Word)) != 1 {
+                                continue
+                        }
+                        allEntries = append(allEntries, entry{ent.Word, ent.Pinyin, ent.Freq})
+                }
+        }
+
+        // 按词频排序
+        sort.Slice(allEntries, func(i, j int) bool {
+                return allEntries[i].Freq > allEntries[j].Freq
+        })
+
+        // 取前 10 个
+        count := 0
+        for _, ent := range allEntries {
+                if count >= 10 {
+                        break
+                }
+                key := ent.Word + "|" + ent.Pinyin
+                if _, exists := out[key]; !exists {
+                        // 单声母联想分数较低
+                        score := e.wPinyinMatch*0.2 + ent.Freq*e.wFreq*0.3
+                        out[key] = &Candidate{
+                                Word:   ent.Word,
+                                Pinyin: ent.Pinyin,
+                                Score:  score,
+                                Source: "initial",
+                        }
+                        count++
                 }
         }
 }
@@ -368,8 +600,7 @@ func (e *Engine) sortCandidates(in map[string]*Candidate) []Candidate {
                 if uf, ok := e.userFreq[userKey]; ok {
                         c.Score += uf * e.wUserFreq
                 }
-                // 加上上下文权重（前一个提交的词是否与当前候选常共现）
-                // 简化处理：如果候选词与上一次提交相同，加权
+                // 加上上下文权重
                 if len(e.commitHistory) > 0 {
                         last := e.commitHistory[len(e.commitHistory)-1]
                         if last == c.Word {
@@ -379,9 +610,47 @@ func (e *Engine) sortCandidates(in map[string]*Candidate) []Candidate {
                 result = append(result, *c)
         }
         sort.Slice(result, func(i, j int) bool {
-                return result[i].Score > result[j].Score
+                // 主排序：分数降序
+                if result[i].Score != result[j].Score {
+                        return result[i].Score > result[j].Score
+                }
+                // 次排序：来源优先级（dict > segment > acronym > fuzzy > typo > initial > missing-initial）
+                return sourcePriority(result[i].Source) > sourcePriority(result[j].Source)
         })
-        return result
+
+        // 去重：相同汉字只保留最高分（避免同字不同拼音占多个位置）
+        seen := make(map[string]bool)
+        deduped := result[:0]
+        for _, c := range result {
+                if seen[c.Word] {
+                        continue
+                }
+                seen[c.Word] = true
+                deduped = append(deduped, c)
+        }
+        return deduped
+}
+
+// sourcePriority 来源优先级（数字越大越优先）
+func sourcePriority(s string) int {
+        switch s {
+        case "dict":
+                return 100
+        case "segment":
+                return 90
+        case "acronym":
+                return 70
+        case "fuzzy":
+                return 60
+        case "typo":
+                return 50
+        case "missing-initial":
+                return 40
+        case "initial":
+                return 30
+        default:
+                return 0
+        }
 }
 
 // Commit 用户选定了某个候选词，更新用户频次
