@@ -228,6 +228,14 @@ func (e *Engine) Search(input string) []Candidate {
                 e.mixedInitialMatch(syls, candMap)
         }
 
+        // 4.7 整句容错匹配：当候选数不足时，对输入做 DP 切分，
+        // 尝试把输入拆成多个词组组合。能处理：
+        //   - 漏字：nizanal -> 你在哪里（ni zai na li）
+        //   - 混合缩写：wzaiszdn -> 我在深圳等你（w zai s z d n）
+        if len(candMap) < 5 {
+                e.sentenceMatch(input, candMap)
+        }
+
         // 4.5 单声母联想：输入 "n" 等单声母时返回高频字
         if len(syls) == 1 && pinyin.IsInitial(syls[0].Raw) && len(candMap) < 5 {
                 e.singleInitialMatch(syls[0].Raw, candMap)
@@ -625,7 +633,139 @@ func (e *Engine) prefixMatch(input string, out map[string]*Candidate) {
         }
 }
 
-// hasTrailingInitial 检查音节序列是否以纯声母音节结尾
+// sentenceMatch 整句容错匹配
+//
+// 对输入串做 DP 切分，每个位置尝试：
+//  1. 完整音节（1-6 字符，IsValidSyllable）
+//  2. 单字符声母（b/p/m/f/...，作为词首字母缩写）
+//
+// 切分后，对每个音节序列做"贪心最长词组匹配"：
+// 从左到右，尝试匹配词典中最长的词组（1-4 音节），
+// 把匹配到的词组拼接成整句候选。
+//
+// 这能处理：
+//   - 漏字：nizanal -> ni+zai+na+li -> 你在哪里（zanal 容错切分为 zai+na+li）
+//   - 混合缩写：wzaiszdn -> w+zai+s+z+d+n -> 我+在+深+圳+等+你
+//
+// 为了控制复杂度，最多尝试前 N 种切分，且总候选数上限 20。
+func (e *Engine) sentenceMatch(input string, out map[string]*Candidate) {
+        if len(input) < 3 {
+                return
+        }
+        // 收集所有可能的切分（限制数量避免爆炸）
+        var allSplits [][]string
+        collectSplits(input, 0, nil, &allSplits, 20)
+
+        type result struct {
+                word    string
+                pinyin  string
+                segs    int // 匹配的音节数
+                covered int // 覆盖的输入字符数
+        }
+        var results []result
+
+        for _, split := range allSplits {
+                // 贪心最长匹配：从左到右匹配词组
+                word, py, segs, covered := e.greedyMatchSentence(split)
+                if word != "" && segs >= 2 {
+                        results = append(results, result{word, py, segs, covered})
+                }
+        }
+
+        // 按覆盖字符数降序、音节数降序排序
+        sort.Slice(results, func(i, j int) bool {
+                if results[i].covered != results[j].covered {
+                        return results[i].covered > results[j].covered
+                }
+                return results[i].segs > results[j].segs
+        })
+
+        added := 0
+        for _, r := range results {
+                if added >= 10 {
+                        break
+                }
+                key := r.word + "|" + r.pinyin
+                if _, ok := out[key]; ok {
+                        continue
+                }
+                // 分数根据覆盖率：覆盖率越高分越高
+                coverage := float64(r.covered) / float64(len(input))
+                score := e.wPinyinMatch * 0.6 * coverage
+                out[key] = &Candidate{
+                        Word:   r.word,
+                        Pinyin: r.pinyin,
+                        Score:  score,
+                        Source: "sentence",
+                }
+                added++
+        }
+}
+
+// collectSplits 递归收集输入串的所有可能切分
+// 每个切分元素要么是完整音节，要么是单字符声母
+func collectSplits(input string, pos int, cur []string, out *[][]string, limit int) {
+        if len(*out) >= limit {
+                return
+        }
+        if pos == len(input) {
+                cp := make([]string, len(cur))
+                copy(cp, cur)
+                *out = append(*out, cp)
+                return
+        }
+        // 尝试音节长度 1-6
+        for l := 1; l <= 6 && pos+l <= len(input); l++ {
+                syl := input[pos : pos+l]
+                if pinyin.IsValidSyllable(syl) {
+                        cur = append(cur, syl)
+                        collectSplits(input, pos+l, cur, out, limit)
+                        cur = cur[:len(cur)-1]
+                } else if l == 1 && pinyin.IsInitial(syl) {
+                        // 单字符声母作为缩写音节
+                        cur = append(cur, syl)
+                        collectSplits(input, pos+l, cur, out, limit)
+                        cur = cur[:len(cur)-1]
+                }
+        }
+}
+
+// greedyMatchSentence 贪心最长词组匹配
+// 对切分后的音节序列，从左到右尝试匹配 1-4 音节的词组
+// 返回拼接的整句、拼音、匹配音节数、覆盖字符数
+func (e *Engine) greedyMatchSentence(syls []string) (string, string, int, int) {
+        var word, py strings.Builder
+        segs := 0
+        covered := 0
+        i := 0
+        for i < len(syls) {
+                matched := false
+                // 尝试 4-1 音节的词组（最长优先）
+                for span := 4; span >= 1 && i+span <= len(syls); span-- {
+                        joined := strings.Join(syls[i:i+span], "")
+                        entries := e.dict.Lookup(joined)
+                        if len(entries) > 0 {
+                                ent := entries[0]
+                                word.WriteString(ent.Word)
+                                py.WriteString(ent.Pinyin)
+                                segs += span
+                                for j := i; j < i+span; j++ {
+                                        covered += len(syls[j])
+                                }
+                                i += span
+                                matched = true
+                                break
+                        }
+                }
+                if !matched {
+                        // 无法匹配，跳过当前音节
+                        i++
+                }
+        }
+        return word.String(), py.String(), segs, covered
+}
+
+
 // 例如 [hen, h] 返回 true（h 是纯声母，Final 为空）
 func hasTrailingInitial(syls []pinyin.Syllable) bool {
         if len(syls) < 2 {

@@ -45,6 +45,10 @@ type IBusEngine struct {
         expanded   bool
         pageOffset int
 
+        // 中英文模式：false=中文（默认），true=英文（Shift 切换）
+        // 英文模式下所有按键直接透传，不处理拼音
+        englishMode bool
+
         // IBus 属性
         engineName string
         engineDesc string
@@ -297,15 +301,44 @@ func (ie *IBusEngine) handleSignal(sig *dbus.Signal) {
 // state 位掩码: IBUS_RELEASE_MASK = 0x40000000（按键释放事件）。
 // 按下事件 state & 0x40000000 == 0，释放事件该位置 1。
 // 只处理按下事件，避免一次按键触发两次（按下+释放都加字母导致重复）。
+//
+// Shift 切换中英文：
+//   - 单独按下 Shift（左或右）切换模式
+//   - 英文模式下所有按键直接透传
+//   - 中文模式下正常处理拼音输入
 func (ie *IBusEngine) ProcessKeyEvent(keyval, keycode, state uint32) (bool, *dbus.Error) {
         ie.mu.Lock()
         defer ie.mu.Unlock()
 
         release := (state & 0x40000000) != 0
+        // Shift 单键切换中英文：只在释放事件检测（避免按下时其他键也被处理）
+        // Shift_L = 0xffe1 (65505), Shift_R = 0xffe2 (65506)
+        if release && (keyval == 65505 || keyval == 65506) {
+                // 检查是否是单独按 Shift（没有其他修饰键）
+                // state 在释放时除 release 位外不应有其他修饰（说明 Shift 是唯一按下的键）
+                // 但 state 仍会包含 Shift 位，所以 mask 掉 release 和 shift 位
+                otherMods := state & ^uint32(0x40000000) & ^uint32(0x0001)
+                if otherMods == 0 {
+                        ie.englishMode = !ie.englishMode
+                        log.Printf("[ibus] Shift toggle -> englishMode=%v", ie.englishMode)
+                        // 切换时清空 preedit
+                        if ie.preedit != "" {
+                                ie.reset()
+                        }
+                        // 通知 ibus 切换状态（可选：发 ForwardKeyEvent 不需要）
+                        return true, nil
+                }
+        }
         if release {
-                // 释放事件直接透传，不处理
                 return false, nil
         }
+
+        // 英文模式：所有按键直接透传
+        if ie.englishMode {
+                log.Printf("[ibus] EN mode: passthrough keyval=%d (%q)", keyval, string(rune(keyval)))
+                return false, nil
+        }
+
         log.Printf("[ibus] ProcessKeyEvent keyval=%d (%q) keycode=%d state=0x%08x preedit=%q cands=%d",
                 keyval, string(rune(keyval)), keycode, state, ie.preedit, len(ie.cands))
 
