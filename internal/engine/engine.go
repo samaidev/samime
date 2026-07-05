@@ -205,6 +205,15 @@ func (e *Engine) Search(input string) []Candidate {
                 e.acronymMatch(syls, candMap)
         }
 
+        // 1.7 简拼/全拼混合匹配（搜狗核心特性）
+        // 输入 "nhao" → "你好"（n 简拼 + hao 全拼）
+        // 输入 "shfa" → "书法"（sh 简拼 + fa 全拼）
+        // 输入 "zhg"  → "中国"（zh 简拼 + g 简拼，acronymMatch 已覆盖，这里处理混合）
+        // 当切分中既有单字符声母（简拼）又有完整音节（全拼）时触发
+        if len(syls) >= 2 && hasMixedInitialAndFull(syls) {
+                e.mixedMatch(syls, candMap)
+        }
+
         // 2. 模糊音匹配
         e.fuzzyMatch(syls, candMap)
 
@@ -268,7 +277,9 @@ func (e *Engine) exactMatch(syls []pinyin.Syllable, out map[string]*Candidate) {
         }
 
         // 子序列匹配仅在整体 lookup 失败时启用，避免与整词竞争
+        // 展开 head×tail 的 Top-K 组合（之前只取每段第 1 个，覆盖面窄）
         if len(syls) >= 2 && len(entries) == 0 {
+                const topK = 3 // 每段取 Top 3
                 for i := 1; i < len(syls); i++ {
                         headSyls := syls[:i]
                         tailSyls := syls[i:]
@@ -276,19 +287,38 @@ func (e *Engine) exactMatch(syls []pinyin.Syllable, out map[string]*Candidate) {
                         tailJoined := pinyin.Join(tailSyls)
                         headEntries := e.dict.Lookup(headJoined)
                         tailEntries := e.dict.Lookup(tailJoined)
-                        if len(headEntries) > 0 && len(tailEntries) > 0 {
-                                combined := headEntries[0].Word + tailEntries[0].Word
-                                combinedPy := headJoined + tailJoined
-                                key := combined + "|" + combinedPy
-                                if _, ok := out[key]; !ok {
-                                        // 子序列组合分数低于整词，避免压过整词
-                                        score := e.wPinyinMatch*0.3 +
-                                                (headEntries[0].Freq+tailEntries[0].Freq)*e.wFreq*0.1
-                                        out[key] = &Candidate{
-                                                Word:   combined,
-                                                Pinyin: combinedPy,
-                                                Score:  score,
-                                                Source: "dict",
+                        if len(headEntries) == 0 || len(tailEntries) == 0 {
+                                continue
+                        }
+                        // 限制每段取 Top-K，避免组合爆炸（最多 topK*topK=9 组合/切分点）
+                        hLimit := topK
+                        if hLimit > len(headEntries) {
+                                hLimit = len(headEntries)
+                        }
+                        tLimit := topK
+                        if tLimit > len(tailEntries) {
+                                tLimit = len(tailEntries)
+                        }
+                        for hi := 0; hi < hLimit; hi++ {
+                                for ti := 0; ti < tLimit; ti++ {
+                                        combined := headEntries[hi].Word + tailEntries[ti].Word
+                                        combinedPy := headJoined + tailJoined
+                                        key := combined + "|" + combinedPy
+                                        if _, ok := out[key]; !ok {
+                                                // 子序列组合分数低于整词，避免压过整词
+                                                // 排名越靠后分越低（hi+ti 越大分越低）
+                                                rankPenalty := 1.0 - float64(hi+ti)*0.1
+                                                if rankPenalty < 0.5 {
+                                                        rankPenalty = 0.5
+                                                }
+                                                score := (e.wPinyinMatch*0.3 +
+                                                        (headEntries[hi].Freq+tailEntries[ti].Freq)*e.wFreq*0.1) * rankPenalty
+                                                out[key] = &Candidate{
+                                                        Word:   combined,
+                                                        Pinyin: combinedPy,
+                                                        Score:  score,
+                                                        Source: "dict",
+                                                }
                                         }
                                 }
                         }
@@ -397,6 +427,132 @@ func (e *Engine) acronymMatch(syls []pinyin.Syllable, out map[string]*Candidate)
 	}
 }
 
+// hasMixedInitialAndFull 检测切分中是否既有单字符声母（简拼）又有完整音节（全拼）
+// 用于触发简拼/全拼混合匹配（搜狗核心特性）
+// 例：[n, hao] → true（n 简拼 + hao 全拼）
+//     [ni, hao] → false（全是全拼）
+//     [n, h] → false（全是简拼，由 acronymMatch 处理）
+// 注意：zh/ch/sh 作为单字符声母处理时，Raw 长度是 2，需特殊判断
+func hasMixedInitialAndFull(syls []pinyin.Syllable) bool {
+	hasShort := false // 有简拼（单字符声母）
+	hasFull := false  // 有全拼（带韵母的完整音节）
+	for _, s := range syls {
+		if s.Final == "" && s.Initial != "" {
+			// 纯声母音节（简拼）：Raw 是单字符声母，或 zh/ch/sh
+			if len(s.Raw) <= 2 && pinyin.IsInitial(s.Raw) {
+				hasShort = true
+			}
+		} else if s.Initial != "" && s.Final != "" {
+			// 完整音节（全拼）
+			hasFull = true
+		}
+	}
+	return hasShort && hasFull
+}
+
+// mixedMatch 简拼/全拼混合匹配（搜狗核心特性）
+// 处理输入中简拼和全拼任意混合的情况：
+//   - "nhao"  → "你好"（n 简拼 + hao 全拼）
+//   - "shfa"  → "书法"（sh 简拼 + fa 全拼）
+//   - "nih"   → "你好"（ni 全拼 + h 简拼）
+//   - "nhaoa" → "你好啊"（n 简拼 + hao 全拼 + a 全拼）
+//
+// 算法：把简拼音节展开为可能的完整音节前缀，用 trie 前缀查找匹配的词条，
+// 然后按"简拼音节数"分级评分（简拼越少分越高，符合搜狗的匹配度排序）。
+func (e *Engine) mixedMatch(syls []pinyin.Syllable, out map[string]*Candidate) {
+	// 统计简拼和全拼音节
+	shortCount := 0 // 简拼音节数
+	for _, s := range syls {
+		if s.Final == "" && s.Initial != "" && len(s.Raw) <= 2 && pinyin.IsInitial(s.Raw) {
+			shortCount++
+		}
+	}
+	if shortCount == 0 {
+		return // 无简拼，不触发
+	}
+
+	// 构造查询模式：简拼音节用声母做前缀，全拼音节用完整拼音
+	// 用 trie 前缀查找所有匹配的拼音串，再 lookup 对应词条
+	// 例：[n, hao] → 前缀 "n" + 精确 "hao" → 查找所有 "n*hao" 形式的拼音
+	//
+	// 实现策略：递归展开简拼音节为所有可能的声母开头拼音前缀，
+	// 与全拼音节拼接，做 trie 前缀查找。为控制组合爆炸，限制总候选数。
+
+	const maxCandidates = 30
+	// 递归收集所有可能的拼音组合
+	// 用 DFS 生成拼音组合并查找
+	var dfs func(idx int, curPy string, shortUsed int)
+	count := 0
+	dfs = func(idx int, curPy string, shortUsed int) {
+		if count >= maxCandidates {
+			return
+		}
+		if idx == len(syls) {
+			// 完整组合，做精确 lookup
+			entries := e.dict.Lookup(curPy)
+			for i, ent := range entries {
+				if i >= 3 {
+					break
+				}
+				if count >= maxCandidates {
+					return
+				}
+				// 词长必须等于音节数
+				if len([]rune(ent.Word)) != len(syls) {
+					continue
+				}
+				key := ent.Word + "|" + ent.Pinyin
+				if _, exists := out[key]; !exists {
+					// 分级评分：简拼越少分越高
+					// 全拼匹配度最高(1.0)，每多一个简拼降 0.15
+					matchRatio := 1.0 - float64(shortUsed)*0.15
+					if matchRatio < 0.4 {
+						matchRatio = 0.4
+					}
+					score := e.wPinyinMatch*0.6*matchRatio + ent.Freq*e.wFreq*0.4
+					out[key] = &Candidate{
+						Word:   ent.Word,
+						Pinyin: ent.Pinyin,
+						Score:  score,
+						Source: "mixed",
+					}
+					count++
+				}
+			}
+			return
+		}
+
+		s := syls[idx]
+		if s.Final == "" && s.Initial != "" && len(s.Raw) <= 2 && pinyin.IsInitial(s.Raw) {
+			// 简拼音节：展开为所有以该声母开头的完整音节
+			// 用 LookupByInitial 获取该声母的高频单字（已按词频降序），
+			// 取其拼音作为展开候选，保证高频音节（如 n→ni, na, neng）优先
+			initialEntries := e.dict.LookupByInitial(s.Raw)
+			// 限制每个简拼展开的候选数，避免组合爆炸
+			expanded := 0
+			seenPy := make(map[string]bool)
+			for _, ent := range initialEntries {
+				if expanded >= 12 {
+					break
+				}
+				// 单字拼音即为展开后的完整音节
+				fullPy := ent.Pinyin
+				if seenPy[fullPy] {
+					continue
+				}
+				seenPy[fullPy] = true
+				dfs(idx+1, curPy+fullPy, shortUsed+1)
+				expanded++
+			}
+		} else {
+			// 全拼音节：直接拼接
+			dfs(idx+1, curPy+s.Raw, shortUsed)
+		}
+	}
+
+	dfs(0, "", 0)
+}
+
 // missingInitialMatch 声母遗漏容错
 // 用户输入纯韵母 "ao" 时，联想 "hao"(好)、"nao"(闹)、"gao"(高) 等
 func (e *Engine) missingInitialMatch(final string, out map[string]*Candidate) {
@@ -462,14 +618,29 @@ func (e *Engine) fuzzyMatch(syls []pinyin.Syllable, out map[string]*Candidate) {
         for i, s := range syls {
                 rawSyls[i] = s.Raw
         }
-        combinations := e.fuzzy.ExpandAll(rawSyls)
-        for _, combo := range combinations {
-                joined := strings.Join(combo, "")
+        // 用带模糊音节数的展开，实现分级评分
+        // 模糊音节越少分越高（搜狗的模糊距离分级）
+        combos := e.fuzzy.ExpandAllWithCount(rawSyls)
+        origJoined := pinyin.Join(syls)
+        totalSyls := len(syls)
+        for _, combo := range combos {
+                joined := strings.Join(combo.Syls, "")
                 // 跳过和原始相同的（已由 exactMatch 处理）
-                if joined == pinyin.Join(syls) {
+                if joined == origJoined {
                         continue
                 }
                 entries := e.dict.Lookup(joined)
+                // 分级评分：模糊音节数越少，折扣越少
+                // 0 个模糊=1.0（不应出现，已跳过），1 个模糊=0.9，2 个=0.8，依此类推
+                // 相比旧版统一 0.7 折扣，模糊少的候选现在能排更高
+                fuzzyRatio := 1.0 - float64(combo.FuzzyCount)*0.1
+                if fuzzyRatio < 0.4 {
+                        fuzzyRatio = 0.4
+                }
+                // 归一化到音节数：模糊 1 个音节在 2 音节词里影响 50%，在 5 音节词里只影响 20%
+                if totalSyls > 0 {
+                        fuzzyRatio = 1.0 - float64(combo.FuzzyCount)/float64(totalSyls)*0.5
+                }
                 for _, ent := range entries {
                         key := ent.Word + "|" + ent.Pinyin
                         if existing, ok := out[key]; ok {
@@ -482,7 +653,7 @@ func (e *Engine) fuzzyMatch(syls []pinyin.Syllable, out map[string]*Candidate) {
                                 out[key] = &Candidate{
                                         Word:   ent.Word,
                                         Pinyin: ent.Pinyin,
-                                        Score:  (e.wPinyinMatch + ent.Freq*e.wFreq) * e.wFuzzy,
+                                        Score:  (e.wPinyinMatch + ent.Freq*e.wFreq) * e.wFuzzy * fuzzyRatio,
                                         Source: "fuzzy",
                                 }
                         }
@@ -490,41 +661,71 @@ func (e *Engine) fuzzyMatch(syls []pinyin.Syllable, out map[string]*Candidate) {
         }
 }
 
-// typoMatch 拼写错误容错
-// 只在变体长度等于原始输入长度，且 segment 后音节数相同时生效
+// typoMatch 拼写错误容错（增强版，覆盖搜狗级联纠错的第一层）
+// 支持 4 种错误类型，每种最多一处操作：
+//   - 替换（replace）：邻键误触，如 nihap→nihao
+//   - 删除（delete）：多打字，如 nihaoo→nihao
+//   - 插入（insert）：漏打字，如 niha→nihao（受邻键限制）
+//   - 转置（transpose）：相邻颠倒，如 nihoa→nihao
+//
+// 评分分级：替换>转置>删除>插入（基于常见误打统计），
+// 每种都按 wTypo 折扣，但替换折扣最少（最可能是真实意图）。
 func (e *Engine) typoMatch(originalInput string, syls []pinyin.Syllable, out map[string]*Candidate) {
-        origLen := len(originalInput)
         origSylCount := len(syls)
-        variants := e.fuzzy.TypoVariants(originalInput)
+        variants := e.fuzzy.TypoVariantsDetailed(originalInput)
+
+        // 每种错误类型的评分系数（越小分越低）
+        // 替换最常见且保留长度，置信度最高；插入/删除改变长度，置信度较低
+        kindWeight := map[string]float64{
+                "replace":   1.0,
+                "transpose": 0.9,
+                "delete":    0.8,
+                "insert":    0.7,
+        }
+
         for _, v := range variants {
-                if v == originalInput {
+                if v.Text == originalInput || v.Cost == 0 {
                         continue
                 }
-                // 长度必须一致
-                if len(v) != origLen {
-                        continue
-                }
-                varSyls := pinyin.Segment(v)
+                varSyls := pinyin.Segment(v.Text)
                 if len(varSyls) == 0 {
                         continue
                 }
-                // 音节数必须一致
-                if len(varSyls) != origSylCount {
-                        continue
+                // 音节数约束：
+                // - replace 不改变长度，音节数应一致
+                // - transpose/insert/delete 可能改变切分，允许音节数差 1
+                //   例：nihoa(3音节) 转置→ nihao(2音节)
+                //       nihaoo(3音节) 删除→ nihao(2音节)
+                sylDelta := len(varSyls) - origSylCount
+                switch v.Kind {
+                case "replace":
+                        if sylDelta != 0 {
+                                continue
+                        }
+                default: // transpose, delete, insert
+                        if sylDelta < -1 || sylDelta > 1 {
+                                continue
+                        }
                 }
                 joined := pinyin.Join(varSyls)
                 entries := e.dict.Lookup(joined)
+                weight := kindWeight[v.Kind]
+                if weight == 0 {
+                        weight = 0.7
+                }
+                // 词长必须等于变体音节数（删除/插入后音节数可能变）
+                expectedLen := len(varSyls)
                 for _, ent := range entries {
-                        // 必须是多音节词（避免单字 typo）
-                        if len(ent.Word) < origSylCount {
+                        if len([]rune(ent.Word)) != expectedLen {
                                 continue
                         }
                         key := ent.Word + "|" + ent.Pinyin
                         if _, ok := out[key]; !ok {
+                                score := (e.wPinyinMatch + ent.Freq*e.wFreq) * e.wTypo * weight
                                 out[key] = &Candidate{
                                         Word:   ent.Word,
                                         Pinyin: ent.Pinyin,
-                                        Score:  (e.wPinyinMatch + ent.Freq*e.wFreq) * e.wTypo,
+                                        Score:  score,
                                         Source: "typo",
                                 }
                         }
@@ -847,8 +1048,12 @@ func sourcePriority(s string) int {
                 return 100
         case "segment":
                 return 90
+        case "mixed": // 简拼/全拼混合匹配（搜狗核心特性）
+                return 80
         case "acronym":
                 return 70
+        case "sentence": // 整句容错匹配，之前缺失导致同分时被排末尾
+                return 65
         case "fuzzy":
                 return 60
         case "typo":
