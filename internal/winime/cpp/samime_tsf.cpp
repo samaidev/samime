@@ -300,22 +300,40 @@ void CandidateWindow::setCandidates(const std::vector<Candidate>& cands, int sel
 
     if (!hwnd_) return;
 
-    // 计算窗口大小
+    // 计算窗口大小（考虑序号徽章 + 拼音提示）
     HDC hdc = GetDC(hwnd_);
     HFONT oldFont = (HFONT)SelectObject(hdc, font_);
     int maxWidth = 0;
-    int lineHeight = 22;
+    int lineHeight = 28;  // 与 onPaint 中一致
+    int padding = 8;
+    int indexWidth = 24;  // 序号徽章宽度
     for (size_t i = 0; i < candidates_.size() && i < 9; i++) {
-        std::wstring text = std::to_wstring(i + 1) + L". " + candidates_[i].word;
+        // 候选词宽度
+        std::wstring word = candidates_[i].word;
         SIZE sz;
-        GetTextExtentPoint32(hdc, text.c_str(), (int)text.size(), &sz);
-        if (sz.cx > maxWidth) maxWidth = sz.cx;
+        GetTextExtentPoint32(hdc, word.c_str(), (int)word.size(), &sz);
+        int wordWidth = sz.cx;
+        // 拼音提示宽度（小字体）
+        if (!candidates_[i].pinyin.empty()) {
+            HFONT smallFont = CreateFont(12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                          DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                                          CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                          DEFAULT_PITCH | FF_DONTCARE, _T("Microsoft YaHei"));
+            HFONT prevFont = (HFONT)SelectObject(hdc, smallFont);
+            std::wstring py = candidates_[i].pinyin;
+            GetTextExtentPoint32(hdc, py.c_str(), (int)py.size(), &sz);
+            SelectObject(hdc, prevFont);
+            DeleteObject(smallFont);
+            wordWidth += sz.cx + 16; // 拼音 + 间距
+        }
+        if (wordWidth > maxWidth) maxWidth = wordWidth;
     }
     SelectObject(hdc, oldFont);
     ReleaseDC(hwnd_, hdc);
 
-    int width = maxWidth + 20;
-    int height = lineHeight * (std::min)(candidates_.size(), (size_t)9) + 10;
+    // 窗口总宽度 = padding + indexWidth + 候选词宽度 + padding
+    int width = maxWidth + indexWidth + padding * 3;
+    int height = lineHeight * (std::min)(candidates_.size(), (size_t)9) + padding * 2;
 
     SetWindowPos(hwnd_, nullptr, x_, y_, width, height,
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
@@ -374,38 +392,119 @@ LRESULT CandidateWindow::onPaint(HWND hwnd) {
 
     RECT rc;
     GetClientRect(hwnd, &rc);
+    int width = rc.right - rc.left;
+    int height = rc.bottom - rc.top;
 
     // 双缓冲
     HDC memDC = CreateCompatibleDC(hdc);
-    HBITMAP memBmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
+    HBITMAP memBmp = CreateCompatibleBitmap(hdc, width, height);
     HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, memBmp);
 
-    FillRect(memDC, &rc, (HBRUSH)GetStockObject(WHITE_BRUSH));
+    // === 现代化背景：浅灰色 + 圆角效果（用渐变模拟）===
+    // 主背景：白色
+    RECT bgRc = {0, 0, width, height};
+    FillRect(memDC, &bgRc, (HBRUSH)GetStockObject(WHITE_BRUSH));
+
+    // 顶部高光（模拟立体感）
+    RECT topRc = {0, 0, width, 2};
+    HBRUSH topBr = CreateSolidBrush(RGB(220, 230, 240));
+    FillRect(memDC, &topRc, topBr);
+    DeleteObject(topBr);
 
     HFONT oldFont = (HFONT)SelectObject(memDC, font_);
     SetBkMode(memDC, TRANSPARENT);
 
-    int lineHeight = 22;
-    int y = 5;
+    // === 配色（现代 UI 风格）===
+    const COLORREF COLOR_SELECTED_BG = RGB(0, 120, 215);   // Windows 10 强调色
+    const COLORREF COLOR_SELECTED_FG = RGB(255, 255, 255);
+    const COLORREF COLOR_NORMAL_FG   = RGB(51, 51, 51);    // 深灰文字
+    const COLORREF COLOR_INDEX_FG    = RGB(180, 180, 180); // 序号浅灰
+    const COLORREF COLOR_PINYIN_FG   = RGB(140, 140, 140); // 拼音提示
+    const COLORREF COLOR_HOVER_BG    = RGB(240, 240, 240);
+
+    int lineHeight = 28;
+    int padding = 8;
+    int y = padding;
+
+    // 计算序号徽章区域宽度
+    int indexWidth = 24;
+
     for (size_t i = 0; i < candidates_.size() && i < 9; i++) {
-        RECT itemRc = {5, y, rc.right - 5, y + lineHeight};
+        RECT itemRc = {padding, y, width - padding, y + lineHeight};
+
+        // 选中项：圆角矩形 + 强调色
         if ((int)i == selectedIdx_) {
-            HBRUSH br = CreateSolidBrush(RGB(51, 153, 255));
-            FillRect(memDC, &itemRc, br);
+            // 用 RoundRect 画圆角矩形
+            HBRUSH br = CreateSolidBrush(COLOR_SELECTED_BG);
+            HPEN oldPen = (HPEN)SelectObject(memDC, GetStockObject(NULL_PEN));
+            HBRUSH oldBr = (HBRUSH)SelectObject(memDC, br);
+            RoundRect(memDC, itemRc.left, itemRc.top, itemRc.right, itemRc.bottom, 6, 6);
+            SelectObject(memDC, oldPen);
+            SelectObject(memDC, oldBr);
             DeleteObject(br);
-            SetTextColor(memDC, RGB(255, 255, 255));
+            SetTextColor(memDC, COLOR_SELECTED_FG);
         } else {
-            SetTextColor(memDC, RGB(0, 0, 0));
+            // 普通项：可选悬停色（这里用静态）
+            SetTextColor(memDC, COLOR_NORMAL_FG);
         }
 
-        std::wstring text = std::to_wstring(i + 1) + L". " + candidates_[i].word;
-        DrawText(memDC, text.c_str(), (int)text.size(), &itemRc,
+        // 序号徽章（圆形数字 1-9）
+        RECT indexRc = {itemRc.left + 4, itemRc.top + 4,
+                        itemRc.left + 4 + 20, itemRc.top + 4 + 20};
+        if ((int)i == selectedIdx_) {
+            // 选中时序号背景透明，文字白色
+            SetTextColor(memDC, RGB(255, 255, 255));
+        } else {
+            // 普通时序号浅灰背景圆
+            HBRUSH indexBr = CreateSolidBrush(RGB(240, 240, 240));
+            HPEN oldPen = (HPEN)SelectObject(memDC, GetStockObject(NULL_PEN));
+            HBRUSH oldBr = (HBRUSH)SelectObject(memDC, indexBr);
+            Ellipse(memDC, indexRc.left, indexRc.top, indexRc.right, indexRc.bottom);
+            SelectObject(memDC, oldPen);
+            SelectObject(memDC, oldBr);
+            DeleteObject(indexBr);
+            SetTextColor(memDC, RGB(120, 120, 120));
+        }
+        // 居中绘制序号
+        std::wstring idxText = std::to_wstring(i + 1);
+        DrawText(memDC, idxText.c_str(), (int)idxText.size(), &indexRc,
+                 DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        // 候选词文字
+        if ((int)i == selectedIdx_) {
+            SetTextColor(memDC, COLOR_SELECTED_FG);
+        } else {
+            SetTextColor(memDC, COLOR_NORMAL_FG);
+        }
+        RECT wordRc = {itemRc.left + indexWidth + 4, itemRc.top,
+                       itemRc.right - 4, itemRc.bottom};
+        std::wstring word = candidates_[i].word;
+        DrawText(memDC, word.c_str(), (int)word.size(), &wordRc,
                  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        // 拼音提示（右对齐，浅色）
+        if ((int)i != selectedIdx_ && !candidates_[i].pinyin.empty()) {
+            SetTextColor(memDC, COLOR_PINYIN_FG);
+            // 用更小字体画拼音
+            HFONT smallFont = CreateFont(12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                          DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                                          CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                          DEFAULT_PITCH | FF_DONTCARE, _T("Microsoft YaHei"));
+            HFONT prevFont = (HFONT)SelectObject(memDC, smallFont);
+            RECT pyRc = {itemRc.left + indexWidth + 4, itemRc.top,
+                         itemRc.right - 4, itemRc.bottom};
+            std::wstring py = candidates_[i].pinyin;
+            DrawText(memDC, py.c_str(), (int)py.size(), &pyRc,
+                     DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+            SelectObject(memDC, prevFont);
+            DeleteObject(smallFont);
+        }
+
         y += lineHeight;
     }
 
     SelectObject(memDC, oldFont);
-    BitBlt(hdc, 0, 0, rc.right, rc.bottom, memDC, 0, 0, SRCCOPY);
+    BitBlt(hdc, 0, 0, width, height, memDC, 0, 0, SRCCOPY);
     SelectObject(memDC, oldBmp);
     DeleteObject(memBmp);
     DeleteDC(memDC);
@@ -415,7 +514,7 @@ LRESULT CandidateWindow::onPaint(HWND hwnd) {
 }
 
 void CandidateWindow::onLButtonDown(int x, int y) {
-    int idx = (y - 5) / 22;
+    int idx = (y - 8) / 28;
     if (idx >= 0 && idx < (int)candidates_.size()) {
         // 通知主服务提交
         // TODO: 通过 callback 通知 SamimeTextService

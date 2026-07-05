@@ -86,12 +86,14 @@ func TestCommitVeryLongWord(t *testing.T) {
 func TestCommitManyTimes(t *testing.T) {
         d, _ := loadTestDict()
         e := NewDefault(d)
-        // 提交 1000 次
+        // 提交 1000 次（时间衰减会让频次略小于 1000，因连续 commit 间隔极短）
         for i := 0; i < 1000; i++ {
                 e.Commit("你好", "nihao")
         }
-        if e.UserFreq()["你好|nihao"] != 1000 {
-                t.Errorf("after 1000 commits, freq = %v", e.UserFreq()["你好|nihao"])
+        freq := e.UserFreq()["你好|nihao"]
+        // 时间衰减引入浮点误差，但应该接近 1000
+        if freq < 999 || freq > 1000 {
+                t.Errorf("after 1000 commits, freq = %v (expected ~1000)", freq)
         }
 }
 
@@ -183,10 +185,10 @@ func TestCommitConcurrent(t *testing.T) {
                 }(i)
         }
         wg.Wait()
-        // 10 * 100 = 1000 次 commit
-        if e.UserFreq()["你好|nihao"] != 1000 {
-                t.Errorf("concurrent commit: expected 1000, got %v",
-                        e.UserFreq()["你好|nihao"])
+        // 10 * 100 = 1000 次 commit（时间衰减导致略小于 1000）
+        freq := e.UserFreq()["你好|nihao"]
+        if freq < 999 || freq > 1000 {
+                t.Errorf("concurrent commit: expected ~1000, got %v", freq)
         }
 }
 

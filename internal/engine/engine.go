@@ -3,6 +3,7 @@ package engine
 
 import (
         "log"
+        "math"
         "sort"
         "strings"
         "sync"
@@ -30,9 +31,11 @@ type Engine struct {
         segmenter  *segmenter.Segmenter
 
         mu            sync.RWMutex
-        userFreq      map[string]float64 // 内存缓存
+        userFreq      map[string]float64 // 内存缓存（带时间衰减后的值）
+        userLastUsed  map[string]time.Time // 最近使用时间（用于时间衰减）
         userStore     *userdict.Store    // 持久化存储（可选）
-        commitHistory []string
+        commitHistory []string           // 最近提交的词（用于上下文联想）
+        contextPairs  map[string]float64 // 上下文共现频次: key = "prevWord|candidateWord"
 
         // 排序权重
         wPinyinMatch float64
@@ -41,6 +44,12 @@ type Engine struct {
         wContext     float64
         wFuzzy       float64
         wTypo        float64
+
+        // 时间衰减参数
+        decayHalfLife time.Duration // 半衰期（默认 24 小时）
+
+        // 上下文联想参数
+        maxContextHistory int // 上下文历史最大长度
 }
 
 // Config 引擎配置
@@ -75,16 +84,20 @@ func New(d *dict.Dict, cfg Config) *Engine {
                 seg = segmenter.New(d)
         }
         return &Engine{
-                dict:         d,
-                fuzzy:        fuzzy.New(),
-                segmenter:    seg,
-                userFreq:     make(map[string]float64),
-                wPinyinMatch: cfg.WPinyinMatch,
-                wFreq:        cfg.WFreq,
-                wUserFreq:    cfg.WUserFreq,
-                wContext:     cfg.WContext,
-                wFuzzy:       cfg.WFuzzy,
-                wTypo:        cfg.WTypo,
+                dict:              d,
+                fuzzy:             fuzzy.New(),
+                segmenter:         seg,
+                userFreq:          make(map[string]float64),
+                userLastUsed:      make(map[string]time.Time),
+                contextPairs:      make(map[string]float64),
+                wPinyinMatch:      cfg.WPinyinMatch,
+                wFreq:             cfg.WFreq,
+                wUserFreq:         cfg.WUserFreq,
+                wContext:          cfg.WContext,
+                wFuzzy:            cfg.WFuzzy,
+                wTypo:             cfg.WTypo,
+                decayHalfLife:     24 * time.Hour, // 24 小时半衰期
+                maxContextHistory: 50,
         }
 }
 
@@ -589,24 +602,42 @@ func (e *Engine) prefixMatch(input string, out map[string]*Candidate) {
 }
 
 // sortCandidates 排序候选
+// 综合考虑：
+//   - 拼音匹配度 + 词频（已在前面计算）
+//   - 用户频次（带时间衰减）
+//   - 上下文联想（前一个提交词与候选词的共现频次）
 func (e *Engine) sortCandidates(in map[string]*Candidate) []Candidate {
         e.mu.RLock()
         defer e.mu.RUnlock()
 
+        // 获取上一个提交词（用于上下文联想）
+        var lastWord string
+        if len(e.commitHistory) > 0 {
+                lastWord = e.commitHistory[len(e.commitHistory)-1]
+        }
+
         result := make([]Candidate, 0, len(in))
         for _, c := range in {
-                // 加上用户频次
+                // 1. 用户频次加权（已在 Commit 中做时间衰减）
                 userKey := c.Word + "|" + c.Pinyin
                 if uf, ok := e.userFreq[userKey]; ok {
                         c.Score += uf * e.wUserFreq
                 }
-                // 加上上下文权重
-                if len(e.commitHistory) > 0 {
-                        last := e.commitHistory[len(e.commitHistory)-1]
-                        if last == c.Word {
-                                c.Score += e.wContext
+
+                // 2. 上下文联想加权：如果上一个词是 lastWord，且 (lastWord, c.Word) 共现过
+                if lastWord != "" && lastWord != c.Word {
+                        ctxKey := lastWord + "|" + c.Word
+                        if coFreq, ok := e.contextPairs[ctxKey]; ok && coFreq > 0 {
+                                // 共现频次越高，加权越大
+                                c.Score += coFreq * e.wContext
                         }
                 }
+
+                // 3. 重复提交加权：如果候选词与上一次提交相同
+                if lastWord == c.Word {
+                        c.Score += e.wContext * 0.5
+                }
+
                 result = append(result, *c)
         }
         sort.Slice(result, func(i, j int) bool {
@@ -654,14 +685,39 @@ func sourcePriority(s string) int {
 }
 
 // Commit 用户选定了某个候选词，更新用户频次
-// 如果启用了持久化，会异步写入 BadgerDB
+// - 时间衰减：旧频次按半衰期衰减后再 +1
+// - 上下文联想：记录 (上一个提交词, 当前词) 共现关系
 func (e *Engine) Commit(word, py string) {
         e.mu.Lock()
         key := word + "|" + py
-        e.userFreq[key]++
+        now := time.Now()
+
+        // 时间衰减：如果之前有频次，按距离上次使用的时间衰减
+        if oldFreq, ok := e.userFreq[key]; ok {
+                if lastUsed, lutOk := e.userLastUsed[key]; lutOk {
+                        elapsed := now.Sub(lastUsed)
+                        decay := math.Pow(0.5, float64(elapsed)/float64(e.decayHalfLife))
+                        e.userFreq[key] = oldFreq*decay + 1.0
+                } else {
+                        e.userFreq[key] = oldFreq + 1.0
+                }
+        } else {
+                e.userFreq[key] = 1.0
+        }
+        e.userLastUsed[key] = now
+
+        // 上下文联想：记录上一个词 → 当前词的共现
+        if len(e.commitHistory) > 0 {
+                prev := e.commitHistory[len(e.commitHistory)-1]
+                if prev != word { // 不记录自连接
+                        ctxKey := prev + "|" + word
+                        e.contextPairs[ctxKey]++
+                }
+        }
+
         e.commitHistory = append(e.commitHistory, word)
-        if len(e.commitHistory) > 100 {
-                e.commitHistory = e.commitHistory[len(e.commitHistory)-100:]
+        if len(e.commitHistory) > e.maxContextHistory {
+                e.commitHistory = e.commitHistory[len(e.commitHistory)-e.maxContextHistory:]
         }
         store := e.userStore
         e.mu.Unlock()

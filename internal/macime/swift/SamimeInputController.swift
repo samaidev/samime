@@ -153,45 +153,70 @@ struct Candidate {
 
 // MARK: - 候选词窗口
 
+// MARK: - 现代化候选词窗口（毛玻璃效果 + 圆角 + 序号徽章）
+
 class CandidateWindow: NSWindow {
     private let tableView = NSTableView()
     private var candidates: [Candidate] = []
     var onSelect: ((Int) -> Void)?
 
+    // 现代配色（macOS Big Sur+ 风格）
+    private let colorSelectedBg = NSColor.controlAccentColor
+    private let colorNormalBg = NSColor.clear
+    private let colorSelectedText = NSColor.white
+    private let colorNormalText = NSColor.labelColor
+    private let colorIndexText = NSColor.secondaryLabelColor
+    private let colorPinyinText = NSColor.tertiaryLabelColor
+
     init() {
-        let frame = NSRect(x: 0, y: 0, width: 200, height: 220)
+        let frame = NSRect(x: 0, y: 0, width: 240, height: 240)
         super.init(contentRect: frame,
-                   styleMask: [.borderless],
+                   styleMask: [.borderless, .fullSizeContentView],
                    backing: .buffered,
                    defer: false)
 
-        // 窗口样式
+        // 现代窗口样式
         self.isOpaque = false
-        self.backgroundColor = NSColor.windowBackgroundColor
+        self.backgroundColor = NSColor.clear
         self.hasShadow = true
         self.level = .popUpMenu
         self.isMovable = false
         self.hidesOnDeactivate = false
         self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        self.isMovableByWindowBackground = false
+
+        // 毛玻璃背景视图
+        let visualEffect = NSVisualEffectView()
+        visualEffect.material = .popover
+        visualEffect.blendingMode = .behindWindow
+        visualEffect.state = .active
+        visualEffect.wantsLayer = true
+        visualEffect.layer?.cornerRadius = 10
+        visualEffect.layer?.masksToBounds = true
 
         // 内容视图
         let clipView = NSClipView()
         clipView.backgroundColor = .clear
         clipView.documentView = tableView
-        self.contentView = clipView
+        clipView.drawsBackground = false
 
-        // 表格配置
+        visualEffect.addSubview(clipView)
+        self.contentView = visualEffect
+
+        // 表格配置（现代样式）
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("cand"))
-        column.width = 200
+        column.width = 240
         tableView.addTableColumn(column)
         tableView.headerView = nil
         tableView.backgroundColor = .clear
-        tableView.rowHeight = 24
-        tableView.intercellSpacing = NSSize(width: 0, height: 0)
+        tableView.rowHeight = 28
+        tableView.intercellSpacing = NSSize(width: 0, height: 4)
+        tableView.style = .fullWidth
         tableView.dataSource = self
         tableView.delegate = self
         tableView.target = self
         tableView.doubleAction = #selector(onDoubleClick(_:))
+        tableView.selectionHighlightStyle = .none  // 自定义选中样式
     }
 
     func setCandidates(_ cands: [Candidate], selected: Int = 0) {
@@ -201,9 +226,9 @@ class CandidateWindow: NSWindow {
             tableView.selectRowIndexes(IndexSet(integer: selected), byExtendingSelection: false)
             tableView.scrollRowToVisible(selected)
         }
-        // 调整窗口高度
-        let h = min(cands.count, 9) * 24 + 4
-        self.setContentSize(NSSize(width: 200, height: h))
+        // 调整窗口高度（自适应）
+        let h = min(cands.count, 9) * 32 + 16
+        self.setContentSize(NSSize(width: 240, height: h))
     }
 
     func setSelected(_ idx: Int) {
@@ -230,24 +255,63 @@ extension CandidateWindow: NSTableViewDataSource, NSTableViewDelegate {
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let cell = NSTextField(labelWithString: "")
-        cell.font = NSFont.systemFont(ofSize: 16)
-        cell.alignment = .left
-        cell.isBezeled = false
-        cell.drawsBackground = true
+        // 自定义 cell：序号徽章 + 候选词 + 拼音提示
+        let cell = NSTableCellView()
+        cell.wantsLayer = true
 
-        if row < candidates.count {
-            let c = candidates[row]
-            cell.stringValue = "\(row + 1). \(c.word)"
-
-            if row == tableView.selectedRow {
-                cell.backgroundColor = NSColor.selectedControlColor
-                cell.textColor = .white
-            } else {
-                cell.backgroundColor = .clear
-                cell.textColor = .textColor
-            }
+        if row >= candidates.count {
+            return cell
         }
+        let c = candidates[row]
+        let isSelected = (row == tableView.selectedRow)
+
+        // 选中背景：圆角强调色
+        if isSelected {
+            cell.layer?.backgroundColor = colorSelectedBg.cgColor
+            cell.layer?.cornerRadius = 6
+        } else {
+            cell.layer?.backgroundColor = NSColor.clear.cgColor
+            cell.layer?.cornerRadius = 0
+        }
+
+        // 序号徽章
+        let indexLabel = NSTextField(labelWithString: "\(row + 1)")
+        indexLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        indexLabel.alignment = .center
+        indexLabel.textColor = isSelected ? NSColor.white.withAlphaComponent(0.9) : colorIndexText
+        indexLabel.frame = NSRect(x: 8, y: 6, width: 20, height: 16)
+        // 序号背景圆
+        if !isSelected {
+            let badgeView = NSView(frame: NSRect(x: 6, y: 4, width: 22, height: 20))
+            badgeView.wantsLayer = true
+            badgeView.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.3).cgColor
+            badgeView.layer?.cornerRadius = 10
+            cell.addSubview(badgeView)
+            badgeView.addSubview(indexLabel)
+            indexLabel.frame.origin = NSPoint(x: 0, y: 2)
+            indexLabel.frame.size = NSSize(width: 22, height: 16)
+        } else {
+            cell.addSubview(indexLabel)
+        }
+
+        // 候选词文字
+        let wordLabel = NSTextField(labelWithString: c.word)
+        wordLabel.font = NSFont.systemFont(ofSize: 16, weight: isSelected ? .semibold : .regular)
+        wordLabel.alignment = .left
+        wordLabel.textColor = isSelected ? colorSelectedText : colorNormalText
+        wordLabel.frame = NSRect(x: 36, y: 4, width: 140, height: 20)
+        cell.addSubview(wordLabel)
+
+        // 拼音提示（右对齐，浅色）
+        if !c.pinyin.isEmpty && !isSelected {
+            let pyLabel = NSTextField(labelWithString: c.pinyin)
+            pyLabel.font = NSFont.systemFont(ofSize: 11)
+            pyLabel.alignment = .right
+            pyLabel.textColor = colorPinyinText
+            pyLabel.frame = NSRect(x: 130, y: 6, width: 100, height: 16)
+            cell.addSubview(pyLabel)
+        }
+
         return cell
     }
 
