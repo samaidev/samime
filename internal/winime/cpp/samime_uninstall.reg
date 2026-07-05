@@ -1,0 +1,7 @@
+Windows Registry Editor Version 5.00
+
+; samime_uninstall.reg - 卸载 samime TSF 服务
+
+[-HKEY_CLASSES_ROOT\CLSID\{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}]
+
+[-HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\CTF\TIP\{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}]

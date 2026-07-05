@@ -1,149 +1,201 @@
-# macOS IMK 输入法
+# macOS IMK 完整实现
 
 ## 文件结构
 
 ```
-internal/macime/
-├── macime.go           # Go 端 Unix Domain Socket 服务
-└── swift/
-    ├── SamimeInputController.swift  # Swift IMK 控制器
-    ├── Info.plist                  # Bundle 配置
-    └── README.md                   # 本文件
+internal/macime/swift/
+├── SamimeInputController.swift  # IMK 控制器 + GoEngineClient + CandidateWindow
+├── Info.plist                   # Bundle 配置
+├── build_imk.sh                 # 构建脚本
+├── sign_and_notarize.sh         # 签名 + 公证脚本
+└── README.md                    # 本文件
 ```
 
-## 架构
+## 实现的组件
 
-```
-+-------------------+    Unix Socket     +-------------------+
-|  macOS 应用       |  <--------------   |  Go Engine        |
-|  (任何 Cocoa 应用) |  JSON 请求/响应     |  (samime)         |
-+-------------------+                    +-------------------+
-        ^                                        |
-        | insertText:                            |
-        v                                        v
-+-------------------+    Unix Socket     +-------------------+
-|  IMK Bundle       |  ----------------> |  Go Engine        |
-|  SamimeInputMethod|   search/commit    |  (samime)         |
-|  .bundle (Swift)  |                    +-------------------+
-+-------------------+
-```
+### 1. GoEngineClient
+- 通过 Unix Domain Socket (`~/.samime/macime.sock`) 与 Go 引擎通信
+- JSON over line-delimited 协议（与 Windows TSF 协议一致）
+- 支持 `search` / `commit` / `reset` / `status`
+- 线程安全（用 dispatch_queue）
 
-## 工作流程
+### 2. CandidateWindow
+- 继承 `NSWindow`
+- 用 `NSTableView` 显示候选词列表
+- 选中高亮（系统色 `selectedControlColor`）
+- 双击选词（`onSelect` 回调）
+- 自动调整窗口大小（最多 9 个候选）
+- 窗口级别 `.popUpMenu`（始终在顶层）
 
-1. 用户在 macOS 应用中打字
-2. 系统通过 IMK 框架把按键事件传给 `SamimeInputController`
-3. Swift 控制器把拼音发送给 Go 引擎（Unix Socket）
-4. Go 引擎返回候选词
-5. Swift 控制器通过 `setMarkedText` 显示候选
-6. 用户选词后，调用 `insertText` 插入文字
+### 3. SamimeInputController
+- 继承 `IMKInputController`
+- 处理按键：字母（拼音）/ 数字 1-9（选词）/ 空格 / 回车 / ESC / 退格
+- 通过 `setMarkedText` 显示预编辑
+- 通过 `insertText` 提交文字到目标应用
+- 通过 `attributes(forCharacterIndex:lineHeightRectangle:)` 获取光标位置
 
-## 编译 Go 引擎（macOS）
+### 4. 服务端管理
+- `SamimeServer.shared` 单例
+- 启动时连接 Go 引擎
+
+## 构建步骤
+
+### 1. 准备工作
 
 ```bash
-# 在 Linux 上交叉编译
+# 安装 Xcode Command Line Tools
+xcode-select --install
+
+# 拉代码
+cd ~/dev
+git clone https://github.com/samaidev/samime.git
+cd samime
+
+# 交叉编译 Go 引擎（在 Linux 上）
 GOOS=darwin GOARCH=arm64 go build -o bin/samime-darwin-arm64 ./cmd/ime-cli
-
 # 或在 macOS 上直接编译
-go build -o samime ./cmd/ime-cli
+go build -o ~/bin/samime ./cmd/ime-cli
 ```
 
-## 启动 Go 引擎服务
+### 2. 编译 IMK Bundle
 
 ```bash
-./samime -mode=service
-# 监听 ~/.samime/macime.sock
+cd internal/macime/swift
+bash build_imk.sh
 ```
 
-## 创建 IMK Bundle
+输出：
+```
+SamimeInputMethod.bundle/
+└── Contents/
+    ├── Info.plist
+    ├── MacOS/
+    │   └── SamimeInputMethod
+    └── Resources/
+        └── icon.icns   (可选)
+```
 
-### 方式1: Xcode 项目
-
-1. 打开 Xcode
-2. File -> New -> Project -> macOS -> Bundle
-3. 命名为 `SamimeInputMethod`
-4. 添加 `SamimeInputController.swift`
-5. 添加 `Info.plist`（见下方）
-6. Link framework: `InputMethodKit.framework`, `Cocoa.framework`
-7. Build
-
-### 方式2: 命令行
+### 3. 启动 Go 引擎服务
 
 ```bash
-mkdir -p SamimeInputMethod.bundle/Contents/MacOS
-swiftc -framework InputMethodKit -framework Cocoa \
-    -emit-library \
-    SamimeInputController.swift \
-    -o SamimeInputMethod.bundle/Contents/MacOS/SamimeInputMethod
-cp Info.plist SamimeInputMethod.bundle/Contents/
-```
+# 前台运行（调试）
+~/bin/samime -mode=service
 
-## Info.plist
+# 或后台运行
+nohup ~/bin/samime -mode=service > ~/.samime/samime.log 2>&1 &
 
-```xml
+# 开机自启动（用 launchd）
+cat > ~/Library/LaunchAgents/com.samime.service.plist <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleDevelopmentRegion</key>
-    <string>zh_CN</string>
-    <key>CFBundleExecutable</key>
-    <string>SamimeInputMethod</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.samime.inputmethod</string>
-    <key>CFBundleInfoDictionaryVersion</key>
-    <string>6.0</string>
-    <key>CFBundleName</key>
-    <string>Samime Input Method</string>
-    <key>CFBundlePackageType</key>
-    <string>BNDL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
-    <key>InputMethodConnectionName</key>
-    <string>SamimeInputMethod_1_Connection</string>
-    <key>InputMethodServerControllerClass</key>
-    <string>SamimeInputController</string>
-    <key>tsInputMethodCharacterRepertoireKey</key>
+    <key>Label</key>
+    <string>com.samime.service</string>
+    <key>ProgramArguments</key>
     <array>
-        <string>Hant</string>
-        <string>Hans</string>
+        <string>/Users/YOU/bin/samime</string>
+        <string>-mode=service</string>
     </array>
-    <key>tsInputMethodIconFileKey</key>
-    <string>icon.icns</string>
-    <key>LSBackgroundOnly</key>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
     <true/>
 </dict>
 </plist>
+EOF
+launchctl load ~/Library/LaunchAgents/com.samime.service.plist
 ```
 
-## 安装
+### 4. 启用输入法
+
+1. 注销并重新登录（让系统发现新 bundle）
+2. 系统偏好设置 → 键盘 → 输入源
+3. 点 `+`，搜索 "Samime"
+4. 添加 "Samime Input Method"
+
+### 5. （可选）签名与公证
+
+如果不签名，macOS 11+ 会拒绝加载 bundle。
 
 ```bash
-# 复制到输入法目录
-cp -R SamimeInputMethod.bundle ~/Library/Input\ Methods/
+DEVELOPER_ID="Developer ID Application: Your Name (TEAMID)" \
+APPLE_ID="you@example.com" \
+TEAM_ID="TEAMID12345" \
+APP_PASSWORD="xxxx-xxxx-xxxx-xxxx" \
+bash sign_and_notarize.sh
+```
 
-# 启动 Go 引擎服务（可加入登录项）
-~/bin/samime -mode=service &
+## 生成应用图标
 
-# 重新登录或注销
-# 系统偏好设置 -> 键盘 -> 输入源 -> + -> Samime Input Method
+```bash
+# 准备 1024x1024 PNG（命名为 icon.png）
+mkdir Samime.iconset
+sips -z 16 16     icon.png --out Samime.iconset/icon_16x16.png
+sips -z 32 32     icon.png --out Samime.iconset/icon_16x16@2x.png
+sips -z 32 32     icon.png --out Samime.iconset/icon_32x32.png
+sips -z 64 64     icon.png --out Samime.iconset/icon_32x32@2x.png
+sips -z 128 128   icon.png --out Samime.iconset/icon_128x128.png
+sips -z 256 256   icon.png --out Samime.iconset/icon_128x128@2x.png
+sips -z 256 256   icon.png --out Samime.iconset/icon_256x256.png
+sips -z 512 512   icon.png --out Samime.iconset/icon_256x256@2x.png
+sips -z 512 512   icon.png --out Samime.iconset/icon_512x512.png
+sips -z 1024 1024 icon.png --out Samime.iconset/icon_512x512@2x.png
+iconutil -c icns Samime.iconset
+mv icon.icns internal/macime/swift/icon.icns
 ```
 
 ## 调试
 
+### 查看日志
+
 ```bash
 # 实时查看 IMK 日志
-log stream --predicate 'subsystem == "com.apple.InputMethodKit"'
+log stream --predicate 'subsystem == "com.apple.InputMethodKit"' --debug
 
 # 查看 Go 引擎日志
-~/bin/samime -mode=service 2>&1 | tee ~/samime.log
+tail -f ~/.samime/samime.log
+```
+
+### 重新加载 IMK
+
+```bash
+# 杀掉 IMK 服务进程
+killall SamimeInputMethod
+
+# 或重新登录
+osascript -e 'tell application "System Events" to log out'
+```
+
+### 检查 bundle 是否被系统识别
+
+```bash
+# 列出所有已安装的输入法
+ls ~/Library/Input\ Methods/
+
+# 检查 Info.plist
+plutil -p ~/Library/Input\ Methods/SamimeInputMethod.bundle/Contents/Info.plist
 ```
 
 ## 当前状态
 
-- [x] Go 端 Unix Domain Socket 服务
-- [x] JSON 协议（与 Windows TSF 相同）
-- [x] Swift IMK 控制器骨架
-- [ ] 候选词窗口 UI（用 IMKCandidateController）
-- [ ] Xcode 项目模板
-- [ ] 应用图标
-- [ ] 代码签名与公证（macOS 11+ 强制要求）
+- [x] **GoEngineClient**：Unix Socket + JSON 协议
+- [x] **CandidateWindow**：NSTableView + 选中高亮 + 双击选词
+- [x] **SamimeInputController**：按键处理 + 预编辑 + 提交
+- [x] **build_imk.sh**：bundle 构建脚本
+- [x] **sign_and_notarize.sh**：签名 + 公证脚本
+- [x] **launchd 配置示例**：开机自启 Go 引擎
+- [x] **图标生成说明**：iconutil 命令
+
+## 已知限制
+
+1. **光标位置**：`attributes(forCharacterIndex:lineHeightRectangle:)` 在某些应用中返回不准确
+2. **预编辑样式**：未自定义下划线/背景色（应用 `IMKServer` 的属性字典）
+3. **签名要求**：必须 Developer ID 签名才能在 macOS 11+ 加载
+4. **未提供 .icns**：需用户自行生成图标
+
+## 参考
+
+- Apple IMK 完整文档：https://developer.apple.com/documentation/inputmethodkit
+- IMK 示例：https://developer.apple.com/library/archive/samplecode/InputMethodKitDemonstration/
+- 签名与公证：https://developer.apple.com/developer-id/

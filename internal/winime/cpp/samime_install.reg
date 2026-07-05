@@ -1,0 +1,33 @@
+Windows Registry Editor Version 5.00
+
+; samime_install.reg - 手动安装 samime TSF 服务（替代 regsvr32）
+; 双击此文件即可安装
+
+[HKEY_CLASSES_ROOT\CLSID\{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}]
+@="Samime TextService"
+
+[HKEY_CLASSES_ROOT\CLSID\{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}\InprocServer32]
+@="C:\\Program Files\\SamIME\\samime_tsf.dll"
+"ThreadingModel"="Apartment"
+
+[HKEY_CLASSES_ROOT\CLSID\{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}\Implemented Categories]
+
+[HKEY_CLASSES_ROOT\CLSID\{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}\Implemented Categories\{534C48D1-F021-4F5C-B59B-4F0D2F75C3CC}]
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\CTF\TIP\{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}]
+"Description"="Samime Chinese Input Method"
+"File"="C:\\Program Files\\SamIME\\samime_tsf.dll"
+"TextService"="Samime"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\CTF\TIP\{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}\LanguageProfile]
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\CTF\TIP\{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}\LanguageProfile\0x00000804]
+"Description"="Samime Chinese Input Method"
+"Icon"="C:\\Program Files\\SamIME\\samime_tsf.dll,0"
+"Name"="Samime"
+"TipFile"="C:\\Program Files\\SamIME\\samime_tsf.dll"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\CTF\TIP\{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}\Category]
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\CTF\TIP\{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}\Category\Category Item{534C48D1-F021-4F5C-B59B-4F0D2F75C3CC}]
+"0"="Samime TextService"

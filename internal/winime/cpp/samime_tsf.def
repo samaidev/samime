@@ -1,0 +1,7 @@
+; samime_tsf.def - DLL 导出定义
+LIBRARY samime_tsf.dll
+EXPORTS
+    DllGetClassObject     PRIVATE
+    DllCanUnloadNow       PRIVATE
+    DllRegisterServer     PRIVATE
+    DllUnregisterServer   PRIVATE
