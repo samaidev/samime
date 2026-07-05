@@ -1,8 +1,7 @@
 #include <tchar.h>
 // samime_reg.cpp - TSF 注册表写入
-//
-// 实现 DllRegisterServer / DllUnregisterServer 的实际逻辑
-// 将 COM 类、TSF 服务、文本服务配置等写入注册表
+#define _UNICODE
+#define UNICODE
 
 #include "samime_tsf.h"
 #include <strsafe.h>
@@ -76,14 +75,14 @@ HRESULT registerServer() {
     // 2. 注册 TSF 文本服务
     setRegString(HKEY_LOCAL_MACHINE, kTsfPath, _T("Description"), SAMIME_SERVICE_DESC);
     setRegString(HKEY_LOCAL_MACHINE, kTsfPath, _T("File"), dllPath);
-    setRegString(HKEY_LOCAL_MACHINE, kTsfPath, _T("TextService", SAMIME_SERVICE_NAME);
+    setRegString(HKEY_LOCAL_MACHINE, kTsfPath, _T("TextService"), SAMIME_SERVICE_NAME);
 
     // 3. 注册 Language Profile
     TCHAR profilePath[MAX_PATH];
     StringCchCopy(profilePath, MAX_PATH, kProfilePath);
     StringCchCat(profilePath, MAX_PATH, _T("\\0x00000804"));
     setRegString(HKEY_LOCAL_MACHINE, profilePath, _T("Description"), SAMIME_SERVICE_DESC);
-    setRegString(HKEY_LOCAL_MACHINE, profilePath, _T("Icon", dllPath));
+    setRegString(HKEY_LOCAL_MACHINE, profilePath, _T("Icon"), dllPath);
     setRegString(HKEY_LOCAL_MACHINE, profilePath, _T("Name"), SAMIME_SERVICE_NAME);
     setRegString(HKEY_LOCAL_MACHINE, profilePath, _T("TipFile"), dllPath);
 
