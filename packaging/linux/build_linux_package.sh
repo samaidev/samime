@@ -182,7 +182,7 @@ if [ -f /etc/systemd/user/samime.service ]; then
     fi
 fi
 
-# 添加 samime 到 IBus 输入源（如果 IBus 在用）
+# 添加 samime 到输入源（支持 GNOME 和 IBus 两种配置）
 if command -v ibus >/dev/null 2>&1; then
     # 刷新 IBus 缓存
     ibus write-cache --system 2>/dev/null || true
@@ -195,10 +195,34 @@ if command -v ibus >/dev/null 2>&1; then
         DBUS_ADDR="unix:path=$XDG_RUNTIME_DIR/bus"
 
         if [ -d "$XDG_RUNTIME_DIR" ]; then
-            # 添加 samime 到预加载引擎列表
-            runuser -u "$REAL_USER" -- env DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDR" \
-                gsettings set org.freedesktop.ibus.general preload-engines \
-                "['xkb:us::eng', 'samime']" 2>/dev/null || true
+            # 方式 1: GNOME 桌面用 org.gnome.desktop.input-sources（Ubuntu/Debian 标准方式）
+            # 这是"设置 → 键盘 → 输入源"实际读取的配置
+            CURRENT_SOURCES=$(runuser -u "$REAL_USER" -- env DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDR" \
+                gsettings get org.gnome.desktop.input-sources sources 2>/dev/null || echo "[]")
+
+            # 检查是否已有 samime
+            if echo "$CURRENT_SOURCES" | grep -q "samime"; then
+                : # 已有，跳过
+            else
+                # 添加 ('ibus', 'samime') 到现有输入源
+                if echo "$CURRENT_SOURCES" | grep -q "\["; then
+                    # 在最后一个 ) 后面添加
+                    NEW_SOURCES=$(echo "$CURRENT_SOURCES" | sed "s/\]$/, ('ibus', 'samime')]/" | sed "s/\[\]/[('ibus', 'samime')]/")
+                else
+                    NEW_SOURCES="[('ibus', 'samime')]"
+                fi
+                runuser -u "$REAL_USER" -- env DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDR" \
+                    gsettings set org.gnome.desktop.input-sources sources "$NEW_SOURCES" 2>/dev/null || true
+            fi
+
+            # 方式 2: 非 GNOME 桌面用 IBus 的 preload-engines（兼容方式）
+            CURRENT_ENGINES=$(runuser -u "$REAL_USER" -- env DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDR" \
+                gsettings get org.freedesktop.ibus.general preload-engines 2>/dev/null || echo "[]")
+            if ! echo "$CURRENT_ENGINES" | grep -q "samime"; then
+                runuser -u "$REAL_USER" -- env DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDR" \
+                    gsettings set org.freedesktop.ibus.general preload-engines \
+                    "['xkb:us::eng', 'samime']" 2>/dev/null || true
+            fi
 
             # 重启 IBus 让组件生效
             runuser -u "$REAL_USER" -- env DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDR" \
