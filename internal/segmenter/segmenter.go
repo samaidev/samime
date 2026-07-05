@@ -67,6 +67,14 @@ func (s *Segmenter) SetBigramWeights(wFreq, wBigram float64) {
 // HasBigram 是否启用了 2-gram
 func (s *Segmenter) HasBigram() bool { return s.useBigram }
 
+// BigramSentenceLogProb 计算词序列的 bigram 对数概率（导出版，供 engine 调用）
+func (s *Segmenter) BigramSentenceLogProb(words []string) float64 {
+	if !s.useBigram || s.bigram == nil {
+		return -10
+	}
+	return s.bigram.SentenceLogProb(words)
+}
+
 // Segment 切分整句
 // 返回：词序列 + 对应拼音序列 + 总分
 //

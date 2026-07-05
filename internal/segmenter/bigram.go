@@ -96,6 +96,9 @@ func (m *BigramModel) LogProb(w1, w2 string) float64 {
 
 // SentenceLogProb 计算整句的对数概率（用于排序）
 // 句首用 <s>，句尾用 </s>
+//
+// 注意：必须用 rune 索引而非 byte 索引，因为中文 UTF-8 每字 3 字节，
+// 之前用 string(w[0]) 取首字节导致永远命中 OOV，bigram 完全失效。
 func (m *BigramModel) SentenceLogProb(words []string) float64 {
 	if len(words) == 0 {
 		return 0
@@ -103,16 +106,18 @@ func (m *BigramModel) SentenceLogProb(words []string) float64 {
 	var total float64
 	prev := "<s>"
 	for _, w := range words {
-		// 对每个词的所有相邻字符对求和
-		if len(w) > 0 {
-			// 第一个字符与前驱
-			total += m.LogProb(prev, string(w[0]))
-			// 词内字符对
-			for i := 0; i < len(w)-1; i++ {
-				total += m.LogProb(string(w[i]), string(w[i+1]))
-			}
-			prev = string(w[len(w)-1])
+		// 转为 rune 切片以正确处理中文
+		chars := []rune(w)
+		if len(chars) == 0 {
+			continue
 		}
+		// 第一个字符与前驱
+		total += m.LogProb(prev, string(chars[0]))
+		// 词内字符对
+		for i := 0; i < len(chars)-1; i++ {
+			total += m.LogProb(string(chars[i]), string(chars[i+1]))
+		}
+		prev = string(chars[len(chars)-1])
 	}
 	total += m.LogProb(prev, "</s>")
 	return total

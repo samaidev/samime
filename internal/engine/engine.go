@@ -237,11 +237,13 @@ func (e *Engine) Search(input string) []Candidate {
                 e.mixedInitialMatch(syls, candMap)
         }
 
-        // 4.7 整句容错匹配：当候选数不足时，对输入做 DP 切分，
-        // 尝试把输入拆成多个词组组合。能处理：
+        // 4.7 整句容错匹配：对输入做 DP 切分，尝试把输入拆成多个词组组合。
+        // 能处理：
         //   - 漏字：nizanal -> 你在哪里（ni zai na li）
         //   - 混合缩写：wzaiszdn -> 我在深圳等你（w zai s z d n）
-        if len(candMap) < 5 {
+        // 触发条件放宽：长句（>=5 音节）总是触发（搜狗长句核心能力），
+        // 短句候选不足 15 时触发（之前门槛 <5 太高，长句常被短路）
+        if len(syls) >= 5 || len(candMap) < 15 {
                 e.sentenceMatch(input, candMap)
         }
 
@@ -328,49 +330,135 @@ func (e *Engine) exactMatch(syls []pinyin.Syllable, out map[string]*Candidate) {
 
 // segmentMatch 整句切分匹配
 // 用动态规划找出最优词组合，作为候选
+// segmentMatch 整句切分匹配（多候选版，借鉴搜狗 N-best 切分）
+// 用 DP 找最优切分，再对每段取 Top-K 候选做笛卡尔积组合，
+// 用 bigram 评分选 Top-N 整句候选（而非只输出单一最优切分）。
+//
+// 之前只产生 1 个候选，且 bigram 因字节索引 bug 失效；
+// 现在修复 bigram 后，多候选竞争能让长句首选准确率显著提升。
 func (e *Engine) segmentMatch(syls []pinyin.Syllable, out map[string]*Candidate) {
-        joined := pinyin.Join(syls)
-        // 已经被 exactMatch 命中的整词，跳过
-        if entries := e.dict.Lookup(joined); len(entries) > 0 {
-                return
-        }
-        words, pinyins, score := e.segmenter.Segment(joined)
-        if len(words) <= 1 {
-                return // 切分失败或单字
-        }
-        // 组合所有非空词
-        var combined strings.Builder
-        var combinedPy strings.Builder
-        allFound := true
-        for i, w := range words {
-                if w == "" {
-                        allFound = false
-                        break
-                }
-                combined.WriteString(w)
-                combinedPy.WriteString(pinyins[i])
-        }
-        if !allFound || combined.Len() == 0 {
-                return
-        }
-        word := combined.String()
-        py := combinedPy.String()
-        key := word + "|" + py
-        if _, ok := out[key]; !ok {
-                // 切分组合分数：基于切分的对数概率转换
-                // score 是负数（log prob），越接近 0 越好
-                // 转换为正向得分：用 max(0, 100 + score * 5) 作为基础
-                baseScore := e.wPinyinMatch * 0.7 // 切分组合略低于整词
-                if score < -20 {
-                        baseScore *= 0.5 // 切分质量差时降权
-                }
-                out[key] = &Candidate{
-                        Word:   word,
-                        Pinyin: py,
-                        Score:  baseScore,
-                        Source: "segment",
-                }
-        }
+	joined := pinyin.Join(syls)
+	// 已经被 exactMatch 命中的整词，跳过
+	if entries := e.dict.Lookup(joined); len(entries) > 0 {
+		return
+	}
+	// 切分并获取每段 Top-K 候选（SegmentAndCombine 已实现但之前未接入）
+	const topK = 3 // 每段取 Top 3 候选词
+	const maxCandidates = 10 // 最多输出 10 个整句候选
+	segments := e.segmenter.SegmentAndCombine(joined, topK)
+	if len(segments) <= 1 {
+		return // 切分失败或单字
+	}
+
+	// 检查所有段是否都有候选
+	for _, seg := range segments {
+		if len(seg) == 0 {
+			return // 有段切不出来，放弃
+		}
+	}
+
+	// 笛卡尔积组合 + Beam Search 剪枝
+	// beam: 当前保留的候选组合列表，每个元素是 (wordSeq, pySeq, bigramScore)
+	type beamItem struct {
+		words []string
+		pys   []string
+		score float64 // 累计 bigram log prob
+	}
+	const beamWidth = 8 // Beam 宽度，控制组合爆炸
+
+	beam := []beamItem{{words: nil, pys: nil, score: 0}}
+	for _, seg := range segments {
+		var newBeam []beamItem
+		for _, bi := range beam {
+			for _, ent := range seg {
+				newWords := append(append([]string(nil), bi.words...), ent.Word)
+				newPys := append(append([]string(nil), bi.pys...), ent.Pinyin)
+				// 增量计算 bigram：新词与前一词的连接分
+				var incScore float64
+				if len(bi.words) == 0 {
+					incScore = e.bigramLogProb([]string{ent.Word})
+				} else {
+					// 前词末字 + 新词首字 + 新词内部
+					prev := bi.words[len(bi.words)-1]
+					incScore = e.bigramConnLogProb(prev, ent.Word)
+				}
+				newBeam = append(newBeam, beamItem{
+					words: newWords,
+					pys:   newPys,
+					score: bi.score + incScore,
+				})
+			}
+		}
+		// Beam 剪枝：按 score 降序保留 Top beamWidth
+		if len(newBeam) > beamWidth {
+			sort.Slice(newBeam, func(i, j int) bool {
+				return newBeam[i].score > newBeam[j].score
+			})
+			newBeam = newBeam[:beamWidth]
+		}
+		beam = newBeam
+	}
+
+	// 按 bigram 分数排序输出 Top-N
+	sort.Slice(beam, func(i, j int) bool {
+		return beam[i].score > beam[j].score
+	})
+	count := 0
+	for _, bi := range beam {
+		if count >= maxCandidates {
+			break
+		}
+		if len(bi.words) == 0 {
+			continue
+		}
+		word := strings.Join(bi.words, "")
+		py := strings.Join(bi.pys, "")
+		key := word + "|" + py
+		if _, ok := out[key]; ok {
+			continue
+		}
+		// 评分：切分质量 + bigram 分数转换
+		// bigram score 是负数（log prob），越接近 0 越好
+		// 转换为正向加分：qualityBonus = (baseBM - score) * 2，分数越高 bonus 越小
+		baseScore := e.wPinyinMatch * 0.7
+		// bigram 越好（score 越接近 0），bonus 越高
+		// score 典型范围 -30 ~ -5，映射到 bonus 0 ~ 30
+		bonus := 0.0
+		if bi.score > -30 {
+			bonus = (30 + bi.score) * 1.0 // score=-5→25, score=-20→10, score=-30→0
+			if bonus < 0 {
+				bonus = 0
+			}
+		}
+		out[key] = &Candidate{
+			Word:   word,
+			Pinyin: py,
+			Score:  baseScore + bonus,
+			Source: "segment",
+		}
+		count++
+	}
+}
+
+// bigramLogProb 单词的 bigram 自身分数（词内字符对 + 句首）
+func (e *Engine) bigramLogProb(words []string) float64 {
+	if !e.segmenter.HasBigram() {
+		return -10 // 无 bigram 时给固定负分
+	}
+	return e.segmenter.BigramSentenceLogProb(words)
+}
+
+// bigramConnLogProb 两个词连接处的 bigram 分数
+// 计算前词末字 + 新词首字 + 新词内部字符对
+func (e *Engine) bigramConnLogProb(prev, cur string) float64 {
+	if !e.segmenter.HasBigram() || prev == "" || cur == "" {
+		return -10
+	}
+	// 用 segmenter 的接口计算 [prev, cur] 的 bigram 分
+	// 减去 prev 单独的分数，得到连接处的增量
+	scoreBoth := e.segmenter.BigramSentenceLogProb([]string{prev, cur})
+	scorePrev := e.segmenter.BigramSentenceLogProb([]string{prev})
+	return scoreBoth - scorePrev
 }
 
 // isAllInitials 检查字符串每个字符是否都是合法声母（单字符）
@@ -768,14 +856,20 @@ func (e *Engine) prefixMatch(input string, out map[string]*Candidate) {
 //   - 漏字：nizanal -> ni+zai+na+li -> 你在哪里（zanal 容错切分为 zai+na+li）
 //   - 混合缩写：wzaiszdn -> w+zai+s+z+d+n -> 我+在+深+圳+等+你
 //
-// 为了控制复杂度，最多尝试前 N 种切分，且总候选数上限 20。
+// 为了控制复杂度，最多尝试前 N 种切分，且总候选数上限 30。
+// 之前上限 20 切分/10 候选对长句不够，放宽到 50 切分/20 候选。
 func (e *Engine) sentenceMatch(input string, out map[string]*Candidate) {
-        if len(input) < 3 {
-                return
-        }
-        // 收集所有可能的切分（限制数量避免爆炸）
-        var allSplits [][]string
-        collectSplits(input, 0, nil, &allSplits, 20)
+	if len(input) < 3 {
+		return
+	}
+	// 收集所有可能的切分（限制数量避免爆炸）
+	// 长句放宽切分上限，让更多切分路径参与竞争
+	splitLimit := 50
+	if len(input) > 15 {
+		splitLimit = 80 // 长句允许更多切分
+	}
+	var allSplits [][]string
+	collectSplits(input, 0, nil, &allSplits, splitLimit)
 
         type result struct {
                 word    string
@@ -803,7 +897,7 @@ func (e *Engine) sentenceMatch(input string, out map[string]*Candidate) {
 
         added := 0
         for _, r := range results {
-                if added >= 10 {
+                if added >= 20 {
                         break
                 }
                 key := r.word + "|" + r.pinyin
