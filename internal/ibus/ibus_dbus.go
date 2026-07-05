@@ -135,28 +135,37 @@ func (ie *IBusEngine) Run() error {
         }
         log.Printf("[ibus] Bus name '%s' acquired", ie.busName)
 
-        // 3. 注册 Factory 对象
-        factory := &IBusFactory{engine: ie}
-        err = conn.Export(factory, ie.objPath, "org.freedesktop.IBus.Factory")
-        if err != nil {
-                return fmt.Errorf("export factory: %w", err)
-        }
-        // 也注册 Service 接口（IBus 要求）
-        conn.Export(factory, ie.objPath, "org.freedesktop.IBus.Service")
-        log.Printf("[ibus] Factory registered at %s", ie.objPath)
+        // 3. 注册 Factory 对象到 /org/freedesktop/IBus/Factory
+	// IBus daemon 期望 factory 在这个固定路径上（IBus.PATH_FACTORY）。
+	// 之前导出到 ie.objPath 是错误的：ibus 在 /org/freedesktop/IBus/Factory
+	// 找不到 Factory 接口，导致 "Object does not implement the interface
+	// 'org.freedesktop.IBus.Factory'" 错误，引擎无法被激活。
+	factoryPath := dbus.ObjectPath("/org/freedesktop/IBus/Factory")
+	factory := &IBusFactory{engine: ie}
+	err = conn.Export(factory, factoryPath, "org.freedesktop.IBus.Factory")
+	if err != nil {
+		return fmt.Errorf("export factory: %w", err)
+	}
+	log.Printf("[ibus] Factory registered at %s", factoryPath)
 
-        // 4. 调用 RegisterComponent 让 IBus daemon 知道我们的 factory
-        ibusObj := conn.Object("org.freedesktop.IBus", "/org/freedesktop/IBus")
-        // 读取组件 XML 并注册
-        componentXML := ie.getComponentXML()
-        call := ibusObj.Call("org.freedesktop.IBus.RegisterComponent", 0, componentXML)
-        if call.Err != nil {
-                log.Printf("[ibus] RegisterComponent failed: %v", call.Err)
-        } else {
-                log.Printf("[ibus] Component registered with IBus daemon")
-        }
+	// 4. 预注册 Engine 接口到 ie.objPath
+	// 当 ibus 调用 Factory.CreateEngine 时，我们返回 ie.objPath，
+	// ibus 会通过该路径上的 org.freedesktop.IBus.Engine 接口发送按键事件。
+	err = conn.Export(ie, ie.objPath, "org.freedesktop.IBus.Engine")
+	if err != nil {
+		return fmt.Errorf("export engine interface: %w", err)
+	}
+	log.Printf("[ibus] Engine interface registered at %s", ie.objPath)
 
-        log.Printf("[ibus] Waiting for IBus to create engine...")
+	// 5. Component 发现：通过磁盘上的 XML 文件
+	// ibus-daemon 启动时扫描 /usr/share/ibus/component/*.xml 和
+	// ~/.config/ibus/component/*.xml 加载组件信息（包括 engine 描述、
+	// 启动命令等）。不需要运行时调用 RegisterComponent —— 那个调用
+	// 期望 IBusComponent variant（D-Bus 签名 v），而我们之前传的是
+	// XML 字符串（签名 s），导致类型不匹配错误。XML 文件已足够。
+	log.Printf("[ibus] Component discovered via on-disk XML file")
+
+	log.Printf("[ibus] Waiting for IBus to create engine...")
 
         // 5. 监听 D-Bus 信号
         ie.loopSignals()
@@ -247,23 +256,14 @@ type IBusFactory struct {
 // CreateEngine 被 IBus daemon 调用，创建 engine 实例
 // 参数: engine_name (string)
 // 返回: engine_path (object path)
+//
+// Engine 接口已在 Run() 中预注册到 ie.objPath，所以这里只需返回该路径。
+// ibus daemon 会通过该路径上的 org.freedesktop.IBus.Engine 接口发送
+// 按键事件（ProcessKeyEvent、FocusIn、Reset 等）。
 func (f *IBusFactory) CreateEngine(engineName string) (dbus.ObjectPath, *dbus.Error) {
-        log.Printf("[ibus] CreateEngine called: %s", engineName)
-
-        // 生成唯一的 engine path
-        enginePath := dbus.ObjectPath(string(f.engine.objPath) + "/0")
-
-        // 注册 engine 接口
-        err := f.engine.conn.Export(f.engine, enginePath, "org.freedesktop.IBus.Engine")
-        if err != nil {
-                log.Printf("[ibus] Export engine failed: %v", err)
-                return "", dbus.MakeFailedError(err)
-        }
-
-        f.engine.objPath = enginePath
-        log.Printf("[ibus] Engine created at %s", enginePath)
-
-        return enginePath, nil
+	log.Printf("[ibus] CreateEngine called: %s", engineName)
+	log.Printf("[ibus] Returning engine path: %s", f.engine.objPath)
+	return f.engine.objPath, nil
 }
 
 // loopSignals 处理 D-Bus 信号（被 IBus 调用）
