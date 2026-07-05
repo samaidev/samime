@@ -357,11 +357,9 @@ func (ie *IBusEngine) ProcessKeyEvent(keyval, keycode, state uint32) (bool, *dbu
                 return false, nil
         }
 
-        // 标点符号智能转换：有 preedit 时先提交 preedit，再转换标点；
-        // 无 preedit 时直接转换标点。
-        // 注意：< > " ' ^ _ $ ~ 这些键本身就需要 Shift 才能输入，
-        // 所以不能用 Shift 状态来判断是否转换。
-        // 只有基础标点（. , ? ! : ; ( ) \）在 Shift 时才透传英文符号。
+        // 标点符号智能转换：有 preedit 时先提交候选词，再输出标点。
+        // 关键：合并成一次 commit（候选词+标点），避免两次 CommitText 信号
+        // 被 ibus 合并/丢失。先清 preedit 状态再 commit，确保信号顺序正确。
         if punct, ok := punctMap[rune(keyval)]; ok {
                 shift := (state & 0x0001) != 0
                 // 基础标点（无需 Shift）在 Shift 时保持英文，方便输入 URL/邮箱/代码
@@ -375,15 +373,30 @@ func (ie *IBusEngine) ProcessKeyEvent(keyval, keycode, state uint32) (bool, *dbu
                         log.Printf("[ibus]   punct %q with Shift -> passthrough (english)", string(rune(keyval)))
                         return false, nil
                 }
-                // 先提交当前 preedit（取第一个候选）
-                if ie.preedit != "" && len(ie.cands) > 0 {
-                        ie.commitCandidate(0)
-                } else if ie.preedit != "" {
-                        ie.commitText(ie.preedit)
-                        ie.reset()
+
+                // 计算要 commit 的完整文本：候选词（或原始拼音）+ 标点
+                var commitStr string
+                if ie.preedit != "" {
+                        if len(ie.cands) > 0 {
+                                c := ie.cands[0]
+                                commitStr = c.Word
+                                ie.engine.Commit(c.Word, c.Pinyin)
+                                log.Printf("[ibus]   punct: commit candidate %q (pinyin=%q)", c.Word, c.Pinyin)
+                        } else {
+                                commitStr = ie.preedit
+                                log.Printf("[ibus]   punct: commit raw preedit %q", ie.preedit)
+                        }
                 }
-                ie.commitText(punct)
-                log.Printf("[ibus]   punct %q -> %q", string(rune(keyval)), punct)
+                commitStr += punct
+
+                // 先清空 preedit 状态，发 Hide 信号清掉候选窗显示
+                ie.preedit = ""
+                ie.cands = nil
+                ie.cursorPos = 0
+                ie.emitSignals()
+                // 一次性 commit 候选词 + 标点
+                ie.commitText(commitStr)
+                log.Printf("[ibus]   punct %q -> commit %q", string(rune(keyval)), commitStr)
                 return true, nil
         }
 
