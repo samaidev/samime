@@ -75,6 +75,15 @@ func (s *Segmenter) BigramSentenceLogProb(words []string) float64 {
 	return s.bigram.SentenceLogProb(words)
 }
 
+// BigramTopNext 返回前驱词的 Top-K 续接候选（导出版，供 engine 调用）
+// 用于续接联想：基于上一次提交的末字预测下一个可能的字
+func (s *Segmenter) BigramTopNext(prev string, topK int) []NextEntry {
+	if !s.useBigram || s.bigram == nil {
+		return nil
+	}
+	return s.bigram.TopNext(prev, topK)
+}
+
 // Segment 切分整句
 // 返回：词序列 + 对应拼音序列 + 总分
 //

@@ -43,6 +43,13 @@ type Dict struct {
 	acronymIndex map[string][]*Entry
 	// acronymReady: 异步构建完成信号，关闭表示构建完成
 	acronymReady chan struct{}
+
+	// 预计算缓存：单字 -> 拼音（多音字取最常用读音）
+	// 用于续接联想：给定汉字反查拼音，匹配用户输入
+	charToPinyin map[string]string
+
+	// 预计算缓存：词 -> 是否存在（用于续接联想判断 bigram 链是否为已收录词）
+	byWord map[string]bool
 }
 
 // New 新建空词典
@@ -52,6 +59,8 @@ func New() *Dict {
 		prefixTrie:         NewTrie(),
 		initialSingleChars: make(map[string][]*Entry),
 		acronymIndex:       make(map[string][]*Entry),
+		charToPinyin:       make(map[string]string),
+		byWord:             make(map[string]bool),
 	}
 }
 
@@ -171,6 +180,23 @@ func (d *Dict) FinalizeLoad() {
 	const topN = 50
 	const maxDepth = 4
 	d.prefixTrie.root.computeTopEntries(d.byPinyin, "", 0, maxDepth, topN)
+
+	// 4.5 预计算单字→拼音映射（用于续接联想反查）
+	// 遍历所有拼音的所有单字条目，记录其拼音
+	// 多音字：只记录第一个遇到的（map 遍历顺序随机，但 entries 已按词频降序，
+	// 同拼音内最高频的先记录；不同拼音间随机，可能取到非最高频读音，
+	// 但对续接联想影响不大——续接靠 bigram 选字，拼音只用于前缀匹配）
+	for py, entries := range d.byPinyin {
+		for _, ent := range entries {
+			if len([]rune(ent.Word)) == 1 {
+				if _, exists := d.charToPinyin[ent.Word]; !exists {
+					d.charToPinyin[ent.Word] = py
+				}
+			}
+			// 同时构建 byWord set（用于续接联想判断 bigram 链是否为已收录词）
+			d.byWord[ent.Word] = true
+		}
+	}
 
 	// 5. 预计算声母缩写索引（acronymIndex）—— 异步构建
 	// pinyin.Segment 对 20 万拼音调用需 ~8s，会拖慢启动。
@@ -457,6 +483,21 @@ func (d *Dict) LookupByInitial(initial string) []*Entry {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return d.initialSingleChars[initial]
+}
+
+// LookupCharPinyin 查询单字的拼音（多音字取最常用读音）
+// 用于续接联想：给定汉字反查拼音，O(1) 查 charToPinyin 缓存
+func (d *Dict) LookupCharPinyin(ch string) string {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.charToPinyin[ch]
+}
+
+// HasWord 检查词是否在词典中（用于续接联想判断 bigram 链是否为已收录词）
+func (d *Dict) HasWord(word string) bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.byWord[word]
 }
 
 // LookupPrefix 前缀匹配，返回所有以 prefix 开头的拼音串

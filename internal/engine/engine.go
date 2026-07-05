@@ -2,19 +2,19 @@
 package engine
 
 import (
-        "log"
-        "math"
-        "sort"
-        "strings"
-        "sync"
-        "time"
+	"log"
+	"math"
+	"sort"
+	"strings"
+	"sync"
+	"time"
 
-        "github.com/zai/goime/internal/clipboard"
-        "github.com/zai/goime/internal/dict"
-        "github.com/zai/goime/internal/fuzzy"
-        "github.com/zai/goime/internal/pinyin"
-        "github.com/zai/goime/internal/segmenter"
-        "github.com/zai/goime/internal/userdict"
+	"github.com/zai/goime/internal/clipboard"
+	"github.com/zai/goime/internal/dict"
+	"github.com/zai/goime/internal/fuzzy"
+	"github.com/zai/goime/internal/pinyin"
+	"github.com/zai/goime/internal/segmenter"
+	"github.com/zai/goime/internal/userdict"
 )
 
 // Candidate 候选词
@@ -163,6 +163,13 @@ func (e *Engine) Search(input string) []Candidate {
                 // 模式 1: 单声母联想（输入 "n"/"w"/"z" 等纯声母时）
                 if pinyin.IsInitial(input) {
                         e.singleInitialMatch(input, candMap)
+                        // 续接联想（搜狗核心特性）：即使切分失败，也尝试续接预测
+                        // 例：上次提交"今天天"，输入"q" → 联想"气怎么样"
+                        if len(e.commitHistory) > 0 {
+                                // 构造伪音节用于续接匹配
+                                pseudoSyls := []pinyin.Syllable{{Initial: input, Final: "", Raw: input}}
+                                e.continuationMatch(input, pseudoSyls, candMap)
+                        }
                         result := e.sortCandidates(candMap)
                         if len(result) > 50 {
                                 result = result[:50]
@@ -250,6 +257,13 @@ func (e *Engine) Search(input string) []Candidate {
         // 4.5 单声母联想：输入 "n" 等单声母时返回高频字
         if len(syls) == 1 && pinyin.IsInitial(syls[0].Raw) && len(candMap) < 5 {
                 e.singleInitialMatch(syls[0].Raw, candMap)
+        }
+
+        // 4.8 续接联想（搜狗核心特性）：基于上一次提交的末字 + bigram 预测
+        // 例：上次提交"今天天"，本次输入"q" → 联想"气怎么样"（天→气 bigram 续接）
+        // 触发条件：有提交历史 + 输入较短（<=4 音节，避免长句干扰）
+        if len(e.commitHistory) > 0 && len(syls) <= 4 {
+                e.continuationMatch(input, syls, candMap)
         }
 
         // 5. 排序
@@ -1016,6 +1030,412 @@ func (e *Engine) greedyMatchSentence(syls []string) (string, string, int, int) {
 }
 
 
+// continuationMatch 续接联想（搜狗核心特性）
+// 基于上一次提交的末字 + bigram 模型预测下一个可能的字/词，
+// 再结合当前输入拼音做前缀查找，生成"前词+续接词"的整句候选。
+//
+// 例：上次提交"今天天"，本次输入"q"
+//   1. 取末字"天"作为上下文锚点
+//   2. bigram.TopNext("天") 返回 [气, 上, 下, 里, ...]（按概率降序）
+//   3. 对每个续接字，查其拼音是否以 "q" 开头（气→qi，匹配！）
+//   4. 用"气"做前缀查找词典，得到"气怎么样""气候""气氛"等
+//   5. 生成候选"今天天气怎么样"等，加分基于 bigram 概率
+//
+// 同时查 contextPairs（用户私有共现）做个性化续接。
+func (e *Engine) continuationMatch(input string, syls []pinyin.Syllable, out map[string]*Candidate) {
+	if len(e.commitHistory) == 0 {
+		return
+	}
+	lastCommit := e.commitHistory[len(e.commitHistory)-1]
+	if lastCommit == "" {
+		return
+	}
+	// 取末字（rune 索引）
+	lastChars := []rune(lastCommit)
+	if len(lastChars) == 0 {
+		return
+	}
+	lastChar := string(lastChars[len(lastChars)-1])
+
+	// 策略 1：bigram 续接预测
+	// 取末字的 Top-K 续接字，对每个续接字检查拼音是否匹配当前输入
+	if e.segmenter.HasBigram() {
+		const topK = 15
+		nexts := e.segmenter.BigramTopNext(lastChar, topK)
+		for _, nx := range nexts {
+			nxPy := e.lookupCharPinyin(nx.Word)
+			if nxPy == "" {
+				continue
+			}
+			// 检查续接字拼音是否以当前输入开头（前缀匹配）
+			if !pyMatchesInput(nxPy, input) {
+				continue
+			}
+			// 续接字匹配！现在用续接字做前缀查找，扩展为多字词
+			e.expandContinuation(lastCommit, nx, input, out)
+		}
+	}
+
+	// 策略 2：用户私有 contextPairs 续接
+	// 查 contextPairs 中 prev=lastCommit 或 prev=lastChar 的续接词
+	e.userContextContinuation(lastCommit, lastChar, input, out)
+}
+
+// lookupCharPinyin 查询单字的拼音（从词典反查）
+// 返回第一个匹配的拼音（多音字取最常用）
+// 用 dict 的 charToPinyin 缓存，O(1) 查询
+func (e *Engine) lookupCharPinyin(ch string) string {
+	if ch == "" {
+		return ""
+	}
+	return e.dict.LookupCharPinyin(ch)
+}
+
+// pyMatchesInput 检查拼音 py 是否匹配用户输入 input
+// 匹配规则：
+//   - input 是 py 的前缀（如 input="q", py="qi" → 匹配）
+//   - input 是 py 的声母缩写（如 input="qx", py="qixy" → 不匹配，需完整音节）
+//   - input == py（精确匹配）
+func pyMatchesInput(py, input string) bool {
+	if input == "" || py == "" {
+		return false
+	}
+	// 前缀匹配
+	if strings.HasPrefix(py, input) {
+		return true
+	}
+	return false
+}
+
+// expandContinuation 用续接字做前缀查找，生成"前词+续接词"的整句候选
+// lastCommit: 上次提交的词（如"今天天"）
+// nextEntry: bigram 预测的续接字（如"气"）
+// input: 当前输入（如"q"）
+//
+// 三种扩展策略（按分数从高到低排序）：
+//  1. 词典前缀查找：从词典找出以续接字拼音开头的多字词（如"气息""气体"）
+//  2. 多级 bigram 链：用 bigram 模型递归续接，生成"气怎么样"这样的连续词组
+//     （词典可能没有"气怎么样"，但 bigram("气","怎")("怎","么")("么","样") 概率很高）
+//  3. 单字续接兜底：只有续接字本身（如"今天天气"）
+func (e *Engine) expandContinuation(lastCommit string, nx segmenter.NextEntry, input string, out map[string]*Candidate) {
+	// 用续接字的拼音做前缀查找，获取多字词候选
+	nxPy := e.lookupCharPinyin(nx.Word)
+	if nxPy == "" {
+		return
+	}
+
+	bonus := 0.0
+	if nx.LogProb > -10 {
+		bonus = (10 + nx.LogProb) * 5 // -2→40, -5→25, -10→0
+		if bonus < 0 {
+			bonus = 0
+		}
+	}
+
+	// 策略 1：词典前缀查找（如"气息""气体"）
+	entries := e.dict.LookupPrefixEntries(nxPy, 20)
+	dictCount := 0
+	for _, ent := range entries {
+		if dictCount >= 5 {
+			break
+		}
+		// 只取以续接字开头的词
+		if !strings.HasPrefix(ent.Word, nx.Word) {
+			continue
+		}
+		combined := lastCommit + ent.Word
+		key := combined + "|"
+		if _, exists := out[key]; exists {
+			continue
+		}
+		// 评分：与 dict 同级基础分 + bigram bonus + 词频
+		score := e.wPinyinMatch + bonus + ent.Freq*e.wFreq*0.5
+		out[key] = &Candidate{
+			Word:   combined,
+			Pinyin: "",
+			Score:  score,
+			Source: "continuation",
+		}
+		dictCount++
+	}
+
+	// 策略 2：多级 bigram 链扩展（如"气"→"气怎"→"气怎么"→"气怎么样"）
+	// 用 Beam Search，每级保留 Top-K，最多扩展到 4 字
+	e.bigramChainExpand(lastCommit, nx, out)
+
+	// 策略 3：高频问句后缀扩展
+	// 当续接字是单字（如"气"）时，附加常见问句后缀词（如"怎么样""怎么办"）
+	// 生成"气怎么样""气怎么办"等候选。这是 char-level bigram 的补充：
+	// bigram("气","怎") 通常 OOV，但"怎么样"是高频词，作为整体附加更合理。
+	e.questionSuffixExpand(lastCommit, nx, out)
+
+	// 策略 4：单字续接兜底
+	if dictCount == 0 {
+		combined := lastCommit + nx.Word
+		key := combined + "|"
+		if _, exists := out[key]; !exists {
+			score := e.wPinyinMatch + bonus
+			out[key] = &Candidate{
+				Word:   combined,
+				Pinyin: "",
+				Score:  score,
+				Source: "continuation",
+			}
+		}
+	}
+}
+
+// questionSuffixExpand 高频问句后缀扩展
+// 对续接字 nx.Word（如"气"），附加常见问句后缀词（如"怎么样"），生成"气怎么样"等候选。
+//
+// 这是 char-level bigram 的补充：bigram("气","怎") 通常 OOV，但"怎么样"作为
+// 整体高频词附加更合理（搜狗输入法也是靠 word-level 模型实现这种续接）。
+//
+// 后缀词列表为常见问句词，评分基于：
+//   - 后缀词词频（高词频加分）
+//   - bigram 链整体评分（nx.Word + 后缀词内部 bigram）
+func (e *Engine) questionSuffixExpand(lastCommit string, nx segmenter.NextEntry, out map[string]*Candidate) {
+	// 高频问句后缀词（按词频排序，常见问句词）
+	suffixes := []string{
+		"怎么样", "怎么办", "是什么", "为什么", "多少",
+		"吗", "呢", "吧", "好吗", "行吗", "了", "的",
+	}
+
+	nxBonus := 0.0
+	if nx.LogProb > -10 {
+		nxBonus = (10 + nx.LogProb) * 5
+		if nxBonus < 0 {
+			nxBonus = 0
+		}
+	}
+
+	for _, suf := range suffixes {
+		combined := lastCommit + nx.Word + suf
+		key := combined + "|"
+		if _, exists := out[key]; exists {
+			continue
+		}
+		// 查后缀词词频（如果在词典中）
+		sufFreq := 0.0
+		if entries := e.dict.Lookup(e.wordPinyin(suf)); len(entries) > 0 {
+			for _, ent := range entries {
+				if ent.Word == suf && ent.Freq > sufFreq {
+					sufFreq = ent.Freq
+				}
+			}
+		}
+		// 计算后缀词内部的 bigram 评分（如"怎么样"的 怎→么→样）
+		// 这反映后缀词本身的连贯性
+		sufBigramScore := e.bigramLogProb([]string{suf})
+		// 评分：基础分 + nx 的 bigram bonus + 后缀词频加成 + 后缀 bigram 加成
+		// sufBigramScore 范围约 -10 ~ -3，转换为正向 bonus
+		sufBonus := 0.0
+		if sufBigramScore > -15 {
+			sufBonus = (15 + sufBigramScore) * 2
+			if sufBonus < 0 {
+				sufBonus = 0
+			}
+		}
+		// 按后缀长度分级词频权重：
+		//   1字（吗/呢/吧/了/的）权重低（太通用，词频高但语义弱）
+		//   2字（好吗/行吗）权重中
+		//   3字（怎么样/怎么办/是什么/为什么/多少）权重高（问句核心词）
+		// 这样"怎么样"能超过"了"排在前面
+		sufLen := len([]rune(suf))
+		freqWeight := 0.1
+		switch sufLen {
+		case 2:
+			freqWeight = 0.3
+		case 3:
+			freqWeight = 0.6
+		}
+		score := e.wPinyinMatch + nxBonus + sufFreq*e.wFreq*freqWeight + sufBonus
+		// 长后缀平方级加分（让3字后缀显著占优）
+		score += float64(sufLen*sufLen) * 10.0
+		out[key] = &Candidate{
+			Word:   combined,
+			Pinyin: "",
+			Score:  score,
+			Source: "continuation",
+		}
+	}
+}
+
+// wordPinyin 计算词的拼音（拼接每个字的拼音）
+func (e *Engine) wordPinyin(word string) string {
+	chars := []rune(word)
+	py := ""
+	for _, c := range chars {
+		py += e.lookupCharPinyin(string(c))
+	}
+	return py
+}
+
+// bigramChainExpand 多级 bigram 续接链扩展
+// 从续接字 nx.Word 出发，用 bigram 模型递归预测下一个字，
+// 生成"气怎么样"这样的连续词组（词典可能没有，但 bigram 概率连续高）。
+//
+// 算法：Beam Search
+//   - beam: 当前保留的候选链列表，每个元素是 (chain字串, 累计 log prob)
+//   - 每一级：对 beam 中每个链，取末字的 Top-K 续接字，扩展出新链
+//   - 保留 Top beamWidth 个链进入下一级
+//   - 最多扩展到 maxDepth 字（不含起始字）
+//
+// 例：nx.Word="气"
+//   第1级：bigram("气") → [怎, 体, 候, 氛, ...]，生成"气怎""气体""气候"...
+//   第2级：bigram("怎") → [么]，生成"气怎么"
+//   第3级：bigram("么") → [样], 生成"气怎么样"
+//   保留分数最高的几个，作为续接候选
+func (e *Engine) bigramChainExpand(lastCommit string, nx segmenter.NextEntry, out map[string]*Candidate) {
+	if !e.segmenter.HasBigram() {
+		return
+	}
+	const (
+		maxDepth    = 3  // 在起始字之后再扩展 3 个字（总长 4 字）
+		beamWidth   = 5  // Beam 宽度
+		topKPerStep = 4  // 每步取 Top-4 续接字
+		minLogProb  = -8.0 // 低于此 log prob 的续接字跳过（避免低质量扩展）
+	)
+
+	type chainItem struct {
+		chars   []string // 已生成的字（含起始字）
+		logProb float64  // 累计 log prob
+	}
+
+	beam := []chainItem{{chars: []string{nx.Word}, logProb: nx.LogProb}}
+
+	for depth := 0; depth < maxDepth; depth++ {
+		var newBeam []chainItem
+		for _, cur := range beam {
+			last := cur.chars[len(cur.chars)-1]
+			nexts := e.segmenter.BigramTopNext(last, topKPerStep)
+			for _, nxt := range nexts {
+				if nxt.LogProb < minLogProb {
+					continue
+				}
+				// 跳过重复字（如"气气"）
+				if nxt.Word == last {
+					continue
+				}
+				newChars := make([]string, len(cur.chars)+1)
+				copy(newChars, cur.chars)
+				newChars[len(cur.chars)] = nxt.Word
+				newBeam = append(newBeam, chainItem{
+					chars:   newChars,
+					logProb: cur.logProb + nxt.LogProb,
+				})
+			}
+		}
+		if len(newBeam) == 0 {
+			break
+		}
+		// 按 log prob 降序保留 Top-K
+		sort.Slice(newBeam, func(i, j int) bool {
+			return newBeam[i].logProb > newBeam[j].logProb
+		})
+		if len(newBeam) > beamWidth {
+			newBeam = newBeam[:beamWidth]
+		}
+		beam = newBeam
+
+		// 把当前 beam 中的链生成为候选词
+		// 仅保留长度 >= depth+2 的链（即至少扩展了 1 字）
+		for _, ci := range beam {
+			if len(ci.chars) < 2 {
+				continue
+			}
+			chainWord := strings.Join(ci.chars, "")
+			// 跳过词典已有的词（避免与策略 1 重复）
+			if e.dict.HasWord(chainWord) {
+				continue
+			}
+			combined := lastCommit + chainWord
+			key := combined + "|"
+			if _, exists := out[key]; exists {
+				continue
+			}
+			// 评分：基础分 + 累计 bigram bonus
+			// ci.logProb 范围约 -6 ~ -2，转换为正向 bonus
+			chainBonus := 0.0
+			if ci.logProb > -15 {
+				chainBonus = (15 + ci.logProb) * 4 // -2→52, -6→36, -15→0
+				if chainBonus < 0 {
+					chainBonus = 0
+				}
+			}
+			// 长链加分（更长更可能是完整词组）
+			lengthBonus := float64(len(ci.chars)) * 5.0
+			score := e.wPinyinMatch + chainBonus + lengthBonus
+			out[key] = &Candidate{
+				Word:   combined,
+				Pinyin: "",
+				Score:  score,
+				Source: "continuation",
+			}
+		}
+	}
+}
+
+// userContextContinuation 用户私有上下文续接
+// 从 contextPairs 中查找 prev=lastCommit 或 prev=lastChar 的续接词
+func (e *Engine) userContextContinuation(lastCommit, lastChar, input string, out map[string]*Candidate) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	// 查 prev=lastCommit 的续接词
+	for key, freq := range e.contextPairs {
+		// key 格式: "prev|cur" 或 "prev1\tprev2|cur"
+		// 只处理 2-gram（无 tab）
+		if strings.Contains(key, "\t") {
+			continue
+		}
+		parts := strings.SplitN(key, "|", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		prev, cur := parts[0], parts[1]
+		// 检查 prev 是否匹配上次提交（完整词或末字）
+		if prev != lastCommit && prev != lastChar {
+			continue
+		}
+		// 检查 cur 的拼音是否匹配输入
+		curPy := e.lookupCharPinyinFirst(cur)
+		if curPy == "" || !pyMatchesInput(curPy, input) {
+			continue
+		}
+		// 生成续接候选
+		combined := lastCommit + cur
+		ckey := combined + "|"
+		if _, exists := out[ckey]; exists {
+			continue
+		}
+		// 用户频次越高分越高
+		bonus := freq * 5
+		if bonus > 50 {
+			bonus = 50
+		}
+		score := e.wPinyinMatch*0.6 + bonus
+		out[ckey] = &Candidate{
+			Word:   combined,
+			Pinyin: "",
+			Score:  score,
+			Source: "continuation",
+		}
+	}
+}
+
+// lookupCharPinyinFirst 取词首字的拼音
+func (e *Engine) lookupCharPinyinFirst(word string) string {
+	if word == "" {
+		return ""
+	}
+	chars := []rune(word)
+	if len(chars) == 0 {
+		return ""
+	}
+	firstChar := string(chars[0])
+	return e.lookupCharPinyin(firstChar)
+}
+
 // 例如 [hen, h] 返回 true（h 是纯声母，Final 为空）
 func hasTrailingInitial(syls []pinyin.Syllable) bool {
         if len(syls) < 2 {
@@ -1144,6 +1564,8 @@ func sourcePriority(s string) int {
                 return 90
         case "mixed": // 简拼/全拼混合匹配（搜狗核心特性）
                 return 80
+        case "continuation": // 续接联想（搜狗核心特性），基于上下文预测
+                return 75
         case "acronym":
                 return 70
         case "sentence": // 整句容错匹配，之前缺失导致同分时被排末尾

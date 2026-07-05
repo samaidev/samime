@@ -6,6 +6,7 @@ import (
 	"embed"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -92,6 +93,41 @@ func (m *BigramModel) LogProb(w1, w2 string) float64 {
 		}
 	}
 	return m.oovLogProb
+}
+
+// NextEntry 续接候选项
+type NextEntry struct {
+	Word    string  // 续接字/词
+	LogProb float64 // P(word|prev) 的对数概率
+}
+
+// TopNext 返回前驱词 w1 的 Top-K 续接候选（按概率降序）
+// 用于续接联想：给定上一次提交的末字，预测下一个可能的字
+// 例：TopNext("天", 5) 返回 [{气, -2.1}, {气怎么样, -3.5}, {上, -4.0}, ...]
+//
+// 注意：bigram 数据是单字→单字，所以 w1 应取末字，返回的也是单字。
+// 调用方可再用词典扩展为多字词。
+func (m *BigramModel) TopNext(w1 string, topK int) []NextEntry {
+	inner, ok := m.bigram[w1]
+	if !ok || len(inner) == 0 {
+		return nil
+	}
+	entries := make([]NextEntry, 0, len(inner))
+	for w2, lp := range inner {
+		// 跳过句尾标记等特殊符号
+		if w2 == "</s>" || w2 == "<s>" {
+			continue
+		}
+		entries = append(entries, NextEntry{Word: w2, LogProb: lp})
+	}
+	// 按概率降序排序
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].LogProb > entries[j].LogProb
+	})
+	if topK > 0 && len(entries) > topK {
+		entries = entries[:topK]
+	}
+	return entries
 }
 
 // SentenceLogProb 计算整句的对数概率（用于排序）
