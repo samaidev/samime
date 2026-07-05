@@ -1,3 +1,4 @@
+#include <tchar.h>
 // samime_reg.cpp - TSF 注册表写入
 //
 // 实现 DllRegisterServer / DllUnregisterServer 的实际逻辑

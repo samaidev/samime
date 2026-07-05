@@ -216,7 +216,7 @@ void D2DRenderer::render(int width, int height,
         std::wstring idxText = std::to_wstring(i + 1);
         D2D1_RECT_F idxRect = D2D1::RectF(itemRect.left + 4, itemRect.top + 4,
                                            itemRect.left + 24, itemRect.top + 24);
-        renderTarget_->DrawTextW(idxText.c_str(), (UINT32)idxText.size(),
+        renderTarget_->DrawText(idxText.c_str(), (UINT32)idxText.size(),
                                   smallTextFormat_, idxRect,
                                   showSelectedStyle ? selectedTextBrush_ : indexTextBrush_);
 
@@ -224,7 +224,7 @@ void D2DRenderer::render(int width, int height,
         D2D1_RECT_F wordRect = D2D1::RectF(itemRect.left + indexWidth + 4, itemRect.top,
                                             itemRect.right - 4, itemRect.bottom);
         std::wstring word = candidates[i].word;
-        renderTarget_->DrawTextW(word.c_str(), (UINT32)word.size(),
+        renderTarget_->DrawText(word.c_str(), (UINT32)word.size(),
                                   textFormat_, wordRect,
                                   showSelectedStyle ? selectedTextBrush_ : normalTextBrush_);
 
@@ -233,7 +233,7 @@ void D2DRenderer::render(int width, int height,
             D2D1_RECT_F pyRect = D2D1::RectF(itemRect.left + indexWidth + 4, itemRect.top,
                                               itemRect.right - 4, itemRect.bottom);
             std::wstring py = candidates[i].pinyin;
-            renderTarget_->DrawTextW(py.c_str(), (UINT32)py.size(),
+            renderTarget_->DrawText(py.c_str(), (UINT32)py.size(),
                                       smallTextFormat_, pyRect, pinyinBrush_);
         }
 
