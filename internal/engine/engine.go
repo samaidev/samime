@@ -733,6 +733,14 @@ func collectSplits(input string, pos int, cur []string, out *[][]string, limit i
 // greedyMatchSentence 贪心最长词组匹配
 // 对切分后的音节序列，从左到右尝试匹配 1-4 音节的词组
 // 返回拼接的整句、拼音、匹配音节数、覆盖字符数
+//
+// 匹配策略（按优先级）：
+//  1. 精确匹配：joined 完整音节串在词典中
+//  2. 前缀扩展匹配：如果当前 span 末尾是单字符声母（缩写），
+//     把它和前面的音节合并做前缀查找。例如 [hen][gao][x] 中
+//     匹配到 [gao][x] 时，用 "gaox" 前缀查到 "gaoxing"(高兴)
+//
+// 这样 hengaox -> hen(很) + gao+x(高兴) = 很高兴
 func (e *Engine) greedyMatchSentence(syls []string) (string, string, int, int) {
         var word, py strings.Builder
         segs := 0
@@ -743,6 +751,7 @@ func (e *Engine) greedyMatchSentence(syls []string) (string, string, int, int) {
                 // 尝试 4-1 音节的词组（最长优先）
                 for span := 4; span >= 1 && i+span <= len(syls); span-- {
                         joined := strings.Join(syls[i:i+span], "")
+                        // 策略 1: 精确匹配
                         entries := e.dict.Lookup(joined)
                         if len(entries) > 0 {
                                 ent := entries[0]
@@ -755,6 +764,32 @@ func (e *Engine) greedyMatchSentence(syls []string) (string, string, int, int) {
                                 i += span
                                 matched = true
                                 break
+                        }
+                        // 策略 2: 前缀扩展匹配
+                        // 仅当 span >= 2 且最后一个音节是单字符声母时
+                        if span >= 2 && len(syls[i+span-1]) == 1 && pinyin.IsInitial(syls[i+span-1]) {
+                                prefixes := e.dict.LookupPrefix(joined)
+                                if len(prefixes) > 0 {
+                                        // 取第一个匹配的前缀对应的词
+                                        for _, pf := range prefixes {
+                                                pfEntries := e.dict.Lookup(pf)
+                                                if len(pfEntries) > 0 {
+                                                        ent := pfEntries[0]
+                                                        word.WriteString(ent.Word)
+                                                        py.WriteString(ent.Pinyin)
+                                                        segs += span
+                                                        for j := i; j < i+span; j++ {
+                                                                covered += len(syls[j])
+                                                        }
+                                                        i += span
+                                                        matched = true
+                                                        break
+                                                }
+                                        }
+                                        if matched {
+                                                break
+                                        }
+                                }
                         }
                 }
                 if !matched {
