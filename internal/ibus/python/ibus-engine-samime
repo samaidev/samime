@@ -112,31 +112,52 @@ class SamimeEngine(IBus.Engine):
 
 class SamimeFactory(IBus.Factory):
     __gtype_name__ = 'SamimeFactory'
-    def __init__(self):
+
+    def __init__(self, bus):
         super().__init__()
+        self._bus = bus
+        # 添加 engine 描述
+        engine_desc = IBus.EngineDesc.new('samime', 'Samime Pinyin',
+            'Samime Chinese Input Method (Go)', 'zh_CN', 'MIT', 'samime', 'us')
+        self.add_engine(engine_desc)
+        # 注册到 bus（关键步骤！）
+        self.register(bus)
+        # 连接 create-engine 信号
         self.connect('create-engine', self.do_create_engine)
+
     def do_create_engine(self, factory, engine_name):
         if engine_name == 'samime':
             engine = SamimeEngine()
             engine.set_name(engine_name)
             return engine
+        return None
 
 
 def main():
     IBus.init()
+
+    # IBus engine 被 ibus-daemon 启动时，通过 IBUS_ADDRESS 环境变量
+    # 指定 IBus 私有 D-Bus 地址。IBus.Bus() 会自动读取这个变量。
     bus = IBus.Bus()
     if not bus.is_connected():
-        sys.stderr.write("[samime] Cannot connect to IBus\n")
+        sys.stderr.write("[samime] Cannot connect to IBus daemon\n")
         sys.exit(1)
-    factory = SamimeFactory()
+
+    sys.stderr.write("[samime] Connected to IBus daemon\n")
+
+    # 创建并注册 Factory（传入 bus 连接）
+    factory = SamimeFactory(bus)
+
+    # 注册组件
     component = IBus.Component.new('org.freedesktop.IBus.Samime',
         'Samime Chinese Input Method (Go)', '1.0.0', 'MIT', 'samime',
-        'https://github.com/samaidev/samime', '')
+        'https://github.com/samaidev/samime', '/usr/libexec/ibus-engine-samime', '')
     component.add_engine(IBus.EngineDesc.new('samime', 'Samime Pinyin',
         'Samime Chinese Input Method (Go)', 'zh_CN', 'MIT', 'samime', 'us'))
     bus.register_component(component)
     bus.set_watch_dbus_signal(True)
-    sys.stderr.write("[samime] IBus engine ready\n")
+
+    sys.stderr.write("[samime] Engine ready, waiting for key events...\n")
     GLib.MainLoop().run()
 
 if __name__ == '__main__':
