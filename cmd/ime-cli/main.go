@@ -77,8 +77,8 @@ func main() {
         case "demo":
                 runDemo(eng)
         case "service":
-                // --ibus 标志被 IBus daemon 使用，service_other.go 会检测 IBUS_ADDRESS
-                _ = ibusMode  // 已在 service_other.go 中通过环境变量检测
+                // --ibus 标志由 IBus daemon 传入；service_other.go 只在 hasIBusFlag 时进入 IBus 模式
+                _ = ibusMode
                 runService(eng)
         case "update":
                 runUpdateCheck()

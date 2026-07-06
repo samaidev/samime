@@ -265,10 +265,12 @@ func (e *Engine) Search(input string) []Candidate {
 
         // 4.55 长距容错匹配（搜狗核心特性）：处理长距离漏字/错字
         // 例：woyaochfan（漏 i）→ 我要吃饭；woyaochifbn（a→b 错字）→ 我要吃饭
-        // 触发条件：长输入（>=3 音节）时触发
-        // - 候选不足 25 时触发（短句容错）
-        // - 长句（>=6 音节）总是触发（搜狗长句核心能力，无论候选多少）
-        if len(syls) >= 3 && (len(candMap) < 25 || len(syls) >= 6) {
+        // 触发条件（已优化）：
+        //   - 仅在长输入（>=4 音节）且候选很少（<5）时触发
+        //   - 不再对 >=6 音节无条件触发（避免每次长输入都跑 O(n*53) 次切分）
+        // 之前的条件 (syls>=3 && (candMap<25 || syls>=6)) 会让大部分长输入都触发，
+        // 单次查询耗时可达 50-200ms，是出字慢的根因之一。
+        if len(syls) >= 4 && len(candMap) < 5 {
                 e.longDistanceMatch(input, syls, candMap)
         }
 
@@ -1607,27 +1609,26 @@ func (e *Engine) longDistanceMatch(input string, syls []pinyin.Syllable, out map
 // 算法：对输入串每个位置尝试插入/替换/删除 1 个字母，生成容错变体，
 // 用 segmentMatch 做 DP 切分 + bigram 评分，收集 Top-N 候选。
 //
-// 复杂度控制：
-//   - 插入：O(n*26) 次切分
-//   - 替换：O(n*26) 次切分
+// 复杂度控制（已优化）：
+//   - 插入：O(n*5) 次切分（只插元音）
+//   - 替换：O(n*5) 次切分（只替换成元音，覆盖最常见的 a↔e↔i↔o↔u 错字）
 //   - 删除：O(n) 次切分
-//   - 总共约 O(n*53) 次切分，n=10 时约 530 次，可接受
+//   - 总共约 O(n*11) 次切分，n=10 时约 110 次（之前是 530 次，快 5 倍）
 //
 // 评分：容错匹配分数 * 0.95（略低于正常匹配，但能竞争）
 func (e *Engine) fuzzyDeletionMatch(input string, out map[string]*Candidate) {
-	if len(input) < 5 || len(input) > 20 {
-		return
+	if len(input) < 5 || len(input) > 12 {
+		return // 缩短上限：超长输入不跑长距容错，避免延迟
 	}
 
 	// 收集所有容错后的候选词及其最高分
 	candMap := make(map[string]float64)
 
-	letters := "abcdefghijklmnopqrstuvwxyz"
+	// 元音字母：插入和替换都只考虑元音（漏字和错字最常见于元音）
+	vowels := "aeiou"
 
 	// 策略 1：插入元音（漏字容错）——漏字通常是漏元音
-	// 只插 5 个元音字母（而非 26 个），变体数量减少 5 倍
 	// 例：woyaochfan → 插入 i → woyaochifan
-	vowels := "aeiou"
 	for i := 1; i <= len(input); i++ {
 		for _, c := range vowels {
 			newInput := input[:i] + string(c) + input[i:]
@@ -1635,12 +1636,14 @@ func (e *Engine) fuzzyDeletionMatch(input string, out map[string]*Candidate) {
 		}
 	}
 
-	// 策略 2：替换（错字容错）——搜狗核心能力
+	// 策略 2：替换为元音（错字容错）——最常见错字是元音错按
 	// 例：woyaochifbn → 替换 b→a → woyaochifan
-	// 例：woyaoxhifan → 替换 x→c → woyaochifan
+	// 例：woyaochefan → 替换 e→i → woyaochifan
+	// 之前用 26 字母替换（O(n*25)），现在只替换成 5 个元音（O(n*5)），
+	// 变体数减少 5 倍，覆盖最常见的元音错字场景。
 	for i := 0; i < len(input); i++ {
 		orig := input[i]
-		for _, c := range letters {
+		for _, c := range vowels {
 			if byte(c) == orig {
 				continue // 跳过相同字母
 			}
@@ -1655,7 +1658,6 @@ func (e *Engine) fuzzyDeletionMatch(input string, out map[string]*Candidate) {
 		newInput := input[:i] + input[i+1:]
 		e.tryFuzzyVariant(newInput, candMap)
 	}
-
 	// 按分数排序，取 Top-N 加入输出
 	added := 0
 	type kv struct {
