@@ -1022,28 +1022,23 @@ func (e *Engine) greedyMatchSentence(syls []string) (string, string, int, int) {
                         }
                         // 策略 2: 前缀扩展匹配
                         // 仅当 span >= 2 且最后一个音节是单字符声母时
-                        if span >= 2 && len(syls[i+span-1]) == 1 && pinyin.IsInitial(syls[i+span-1]) {
-                                prefixes := e.dict.LookupPrefix(joined)
-                                if len(prefixes) > 0 {
-                                        // 取第一个匹配的前缀对应的词
-                                        for _, pf := range prefixes {
-                                                pfEntries := e.dict.Lookup(pf)
-                                                if len(pfEntries) > 0 {
-                                                        ent := pfEntries[0]
-                                                        word.WriteString(ent.Word)
-                                                        py.WriteString(ent.Pinyin)
-                                                        segs += span
-                                                        for j := i; j < i+span; j++ {
-                                                                covered += len(syls[j])
-                                                        }
-                                                        i += span
-                                                        matched = true
-                                                        break
-                                                }
+                        // v4 优化：用 LookupPrefixEntries（有 topEntries 缓存，O(1)）
+                        // 替代 LookupPrefix + 循环 Lookup（DFS 遍历 + 多次 map 查询）
+                        // 限制 joined 长度 <= 4（只有 ≤4 字符前缀有 topEntries 缓存）
+                        // 长前缀无缓存时会回退到 DFS 遍历，p99 可达 300ms
+                        if span >= 2 && len(joined) <= 4 && len(syls[i+span-1]) == 1 && pinyin.IsInitial(syls[i+span-1]) {
+                                pfEntries := e.dict.LookupPrefixEntries(joined, 3)
+                                if len(pfEntries) > 0 {
+                                        ent := pfEntries[0]
+                                        word.WriteString(ent.Word)
+                                        py.WriteString(ent.Pinyin)
+                                        segs += span
+                                        for j := i; j < i+span; j++ {
+                                                covered += len(syls[j])
                                         }
-                                        if matched {
-                                                break
-                                        }
+                                        i += span
+                                        matched = true
+                                        break
                                 }
                         }
                 }
