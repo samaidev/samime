@@ -11,6 +11,7 @@ package segmenter
 
 import (
         "math"
+        "sort"
         "strings"
 
         "github.com/zai/goime/internal/dict"
@@ -244,3 +245,221 @@ func (s *Segmenter) SegmentAndCombine(input string, topK int) [][]dict.Entry {
         }
         return result
 }
+
+
+// SplitPath 切分路径（用于 N-best）
+type SplitPath struct {
+        Words   []string
+        Pinyins []string
+        Score   float64
+}
+
+// SegmentNBest 返回 Top-N 切分路径
+// 算法：DP 表每位置存 Top-K 候选回溯点，回溯时枚举路径组合
+// 用于整句重排：多种切分路径参与竞争，bigram 选最优
+func (s *Segmenter) SegmentNBest(input string, n int) []SplitPath {
+        input = strings.ToLower(strings.TrimSpace(input))
+        if len(input) == 0 || n <= 0 {
+                return nil
+        }
+
+        type cand struct {
+                endPos int
+                py     string
+                word   string
+                score  float64
+        }
+        // dp[i] = 从位置 i 出发的 Top-K 候选列表
+        const k = 5 // 每位置保留 Top-5 候选（v4: 从 3 提到 5，枚举更多切分）
+        dp := make([][]cand, len(input)+1)
+        dp[len(input)] = []cand{{endPos: len(input), py: "", word: "", score: 0}}
+
+        for i := len(input) - 1; i >= 0; i-- {
+                var cands []cand
+                maxLen := s.maxWordLen * 6
+                if i+maxLen > len(input) {
+                        maxLen = len(input) - i
+                }
+                for l := 1; l <= maxLen; l++ {
+                        j := i + l
+                        if len(dp[j]) == 0 {
+                                continue
+                        }
+                        substr := input[i:j]
+                        syls := pinyin.Segment(substr)
+                        if len(syls) == 0 {
+                                continue
+                        }
+                        joinedPy := pinyin.Join(syls)
+                        entries := s.dict.Lookup(joinedPy)
+                        var logProb float64
+                        var word string
+                        if len(entries) > 0 {
+                                best := entries[0]
+                                logProb = math.Log(best.Freq+1) - s.logTotal
+                                word = best.Word
+                        } else {
+                                if len(syls) == 1 {
+                                        logProb = s.unknownPenalty
+                                        word = ""
+                                } else {
+                                        continue
+                                }
+                        }
+                        // 对每个 j 的 Top-K 后继，生成本位置的候选
+                        for _, next := range dp[j] {
+                                score := logProb*s.wFreq + next.score
+                                cands = append(cands, cand{endPos: j, py: joinedPy, word: word, score: score})
+                        }
+                }
+                if len(cands) == 0 {
+                        // OOV 单字 fallback
+                        if i+1 <= len(input) && len(dp[i+1]) > 0 {
+                                next := dp[i+1][0]
+                                dp[i] = []cand{{endPos: i + 1, py: string(input[i]), word: "", score: s.unknownPenalty + next.score}}
+                        }
+                        continue
+                }
+                // 按 score 降序保留 Top-K
+                sort.Slice(cands, func(a, b int) bool { return cands[a].score > cands[b].score })
+                if len(cands) > k {
+                        cands = cands[:k]
+                }
+                dp[i] = cands
+        }
+
+        // 回溯：从 dp[0] 出发，DFS 枚举路径，收集 Top-N
+        var paths []SplitPath
+        var backtrack func(pos int, words, pinyins []string, score float64)
+        backtrack = func(pos int, words, pinyins []string, score float64) {
+                if pos >= len(input) {
+                        // 到达末尾，记录路径（words/pinyins 已是正序，无需反转）
+                        cpWords := make([]string, len(words))
+                        cpPys := make([]string, len(pinyins))
+                        copy(cpWords, words)
+                        copy(cpPys, pinyins)
+                        paths = append(paths, SplitPath{Words: cpWords, Pinyins: cpPys, Score: score})
+                        return
+                }
+                for _, c := range dp[pos] {
+                        // copy 避免共享底层数组
+                        newWords := make([]string, len(words)+1)
+                        copy(newWords, words)
+                        newWords[len(words)] = c.word
+                        newPys := make([]string, len(pinyins)+1)
+                        copy(newPys, pinyins)
+                        newPys[len(pinyins)] = c.py
+                        backtrack(c.endPos, newWords, newPys, score+c.score)
+                        if len(paths) >= n*4 {
+                                return // 收集足够多就停止
+                        }
+                }
+        }
+        backtrack(0, nil, nil, 0)
+
+        // 按 score 降序排序
+        sort.Slice(paths, func(a, b int) bool { return paths[a].Score > paths[b].Score })
+        if len(paths) > n {
+                paths = paths[:n]
+        }
+        return paths
+}
+
+// SegmentAndCombineNBest 基于 N-best 切分的候选组合
+// 对每条切分路径，每段取 Top-K 候选词，用 bigram 全句评分选 Top-N
+func (s *Segmenter) SegmentAndCombineNBest(input string, topK, nSplits, nResults int) []SplitPath {
+        paths := s.SegmentNBest(input, nSplits)
+        if len(paths) == 0 {
+                return nil
+        }
+
+        type result struct {
+                words []string
+                pys   []string
+                score float64
+        }
+        var allResults []result
+
+        for _, path := range paths {
+                // 对这条切分路径，每段取 Top-K 候选，beam search 组合
+                beam := []struct {
+                        words []string
+                        pys   []string
+                        score float64
+                }{{words: nil, pys: nil, score: 0}}
+
+                for segIdx, py := range path.Pinyins {
+                        entries := s.dict.Lookup(py)
+                        if len(entries) == 0 {
+                                // OOV，用空词
+                                for bi := range beam {
+                                        beam[bi].words = append(beam[bi].words, "")
+                                        beam[bi].pys = append(beam[bi].pys, py)
+                                }
+                                continue
+                        }
+                        if len(entries) > topK {
+                                entries = entries[:topK]
+                        }
+                        var newBeam []struct {
+                                words []string
+                                pys   []string
+                                score float64
+                        }
+                        for _, bi := range beam {
+                                for _, ent := range entries {
+                                        newWords := append(append([]string(nil), bi.words...), ent.Word)
+                                        newPys := append(append([]string(nil), bi.pys...), ent.Pinyin)
+                                        // bigram 连接分
+                                        var incScore float64
+                                        if len(bi.words) == 0 {
+                                                incScore = s.bigram.SentenceLogProb([]string{ent.Word})
+                                        } else {
+                                                prev := bi.words[len(bi.words)-1]
+                                                // 前词末字 + 新词首字 + 新词内部
+                                                scoreBoth := s.bigram.SentenceLogProb([]string{prev, ent.Word})
+                                                scorePrev := s.bigram.SentenceLogProb([]string{prev})
+                                                incScore = scoreBoth - scorePrev
+                                        }
+                                        // 加词频
+                                        freqScore := (math.Log(ent.Freq+1) - s.logTotal) * s.wFreq
+                                        newBeam = append(newBeam, struct {
+                                                words []string
+                                                pys   []string
+                                                score float64
+                                        }{newWords, newPys, bi.score + incScore*s.wBigram + freqScore})
+                                }
+                        }
+                        // Beam 剪枝
+                        if len(newBeam) > 12 {
+                                sort.Slice(newBeam, func(a, b int) bool { return newBeam[a].score > newBeam[b].score })
+                                newBeam = newBeam[:12]
+                        }
+                        beam = newBeam
+                        _ = segIdx
+                }
+                for _, bi := range beam {
+                        if len(bi.words) == 0 {
+                                continue
+                        }
+                        allResults = append(allResults, result{bi.words, bi.pys, bi.score})
+                }
+        }
+
+        // 全局排序取 Top-N
+        sort.Slice(allResults, func(a, b int) bool { return allResults[a].score > allResults[b].score })
+        if len(allResults) > nResults {
+                allResults = allResults[:nResults]
+        }
+
+        out := make([]SplitPath, len(allResults))
+        for i, r := range allResults {
+                out[i] = SplitPath{
+                        Words:   r.words,
+                        Pinyins: r.pys,
+                        Score:   r.score,
+                }
+        }
+        return out
+}
+

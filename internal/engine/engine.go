@@ -471,6 +471,42 @@ func (e *Engine) segmentMatch(syls []pinyin.Syllable, out map[string]*Candidate)
 		}
 		count++
 	}
+
+	// v4: N-best 切分 + 全句 bigram 重排，补充更多候选路径
+	// 解决单一 DP 切分遗漏问题（如 想等下过去找你 被切分成 想等+下+过去+找+你）
+	if e.segmenter.HasBigram() && len(joined) >= 6 {
+		nbestPaths := e.segmenter.SegmentAndCombineNBest(joined, 4, 5, 15)
+		for _, path := range nbestPaths {
+			if len(path.Words) == 0 {
+				continue
+			}
+			word := strings.Join(path.Words, "")
+			py := strings.Join(path.Pinyins, "")
+			if word == "" {
+				continue
+			}
+			key := word + "|" + py
+			if _, ok := out[key]; ok {
+				continue
+			}
+			// N-best 候选评分：基于 bigram 全句分数
+			// path.Score 已经是 bigram + 词频混合分，转为候选分
+			baseScore := e.wPinyinMatch * 0.7
+			bonus := 0.0
+			if path.Score > -30 {
+				bonus = (30 + path.Score) * 1.0
+				if bonus < 0 {
+					bonus = 0
+				}
+			}
+			out[key] = &Candidate{
+				Word:   word,
+				Pinyin: py,
+				Score:  baseScore + bonus,
+				Source: "segment_nbest",
+			}
+		}
+	}
 }
 
 // bigramLogProb 单词的 bigram 自身分数（词内字符对 + 句首）
@@ -913,16 +949,33 @@ func (e *Engine) sentenceMatch(input string, out map[string]*Candidate) {
                 }
         }
 
-        // 按覆盖字符数降序、音节数降序排序
-        sort.Slice(results, func(i, j int) bool {
-                if results[i].covered != results[j].covered {
-                        return results[i].covered > results[j].covered
+        // v4: 用 bigram 全句评分重排，让连贯的整句排前面
+        type scoredResult struct {
+                word, pinyin string
+                covered      int
+                bigramScore  float64
+        }
+        var scored []scoredResult
+        for _, r := range results {
+                bs := 0.0
+                if e.segmenter.HasBigram() {
+                        lp := e.segmenter.BigramSentenceLogProb([]string{r.word})
+                        if lp > -50 {
+                                bs = (50 + lp) // 越接近 0 越好
+                        }
                 }
-                return results[i].segs > results[j].segs
+                scored = append(scored, scoredResult{r.word, r.pinyin, r.covered, bs})
+        }
+        // 排序：覆盖率降序，然后 bigram 分降序
+        sort.Slice(scored, func(i, j int) bool {
+                if scored[i].covered != scored[j].covered {
+                        return scored[i].covered > scored[j].covered
+                }
+                return scored[i].bigramScore > scored[j].bigramScore
         })
 
         added := 0
-        for _, r := range results {
+        for _, r := range scored {
                 if added >= 20 {
                         break
                 }
@@ -930,9 +983,10 @@ func (e *Engine) sentenceMatch(input string, out map[string]*Candidate) {
                 if _, ok := out[key]; ok {
                         continue
                 }
-                // 分数根据覆盖率：覆盖率越高分越高
+                // 分数：覆盖率 × (1 + bigram连贯性/50) × wPinyinMatch × 0.6
                 coverage := float64(r.covered) / float64(len(input))
-                score := e.wPinyinMatch * 0.6 * coverage
+                coherence := 1.0 + r.bigramScore/50.0
+                score := e.wPinyinMatch * 0.6 * coverage * coherence
                 out[key] = &Candidate{
                         Word:   r.word,
                         Pinyin: r.pinyin,
