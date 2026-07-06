@@ -808,7 +808,8 @@ func (ie *IBusEngine) emitSignals() {
 				makeIBusTextVariant(ie.preedit), true)
 		}
 	} else {
-		auxText := ie.preedit + " | " + ie.buildHorizontalCandidates()
+		// preedit 和候选词用换行分隔，分两行显示
+		auxText := ie.preedit + "\n" + ie.buildHorizontalCandidates()
 		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.UpdateAuxiliaryText",
 			makeIBusTextVariant(auxText), true)
 	}
