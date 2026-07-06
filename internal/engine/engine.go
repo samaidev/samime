@@ -1668,7 +1668,7 @@ func (e *Engine) longDistanceMatch(input string, syls []pinyin.Syllable, out map
 //
 // 评分：容错匹配分数 * 0.95（略低于正常匹配，但能竞争）
 func (e *Engine) fuzzyDeletionMatch(input string, out map[string]*Candidate) {
-	if len(input) < 5 || len(input) > 12 {
+	if len(input) < 5 || len(input) > 14 { // v4: 上限从 12 提到 14，支持更长输入的漏字容错
 		return // 缩短上限：超长输入不跑长距容错，避免延迟
 	}
 
