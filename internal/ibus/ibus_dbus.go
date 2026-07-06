@@ -783,12 +783,11 @@ func (ie *IBusEngine) emitSignals() {
 		// 清空预编辑
 		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.HidePreeditText")
 	} else {
-		// UpdatePreeditText 信号签名: (vuu) —— IBusText variant, cursor_pos, visible
-		// 注意：GNOME Shell 把 preedit 和 auxiliary text 显示在同一区域，
-		// auxiliary 会覆盖 preedit。这里仍发 preedit（兼容某些 IBus 前端），
-		// 但实际显示靠下面的 auxiliary text（preedit + 候选词）。
+		// UpdatePreeditText 信号签名: (vubu) —— IBusText variant, cursor_pos, visible(bool), mode(uint32)
+		// mode: 0=IBUS_ENGINE_PREEDIT_CLEAR（focus out 时清空）
+		// 之前发 (vuu) 签名错误，GNOME Shell 解析失败，inline preedit 不生效
 		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.UpdatePreeditText",
-			makeIBusTextVariant(ie.preedit), uint32(len(ie.preedit)), true)
+			makeIBusTextVariant(ie.preedit), uint32(len(ie.preedit)), true, uint32(0))
 	}
 
 	// UpdateAuxiliaryText 信号签名: (vb) —— IBusText variant, visible
