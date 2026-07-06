@@ -274,7 +274,12 @@ func (e *Engine) Search(input string) []Candidate {
         //   - 4 音节输入若已有 exactMatch 结果（candMap>=3），不需要长距容错
         //   - 之前的条件 (syls>=4 && candMap<5) 会让 woaixuexi 等 4 字输入
         //     在 fuzzyMatch 限制后触发，导致 p50 从 1ms 飙到 12ms
-        if len(syls) >= 5 && len(candMap) < 3 {
+        // v4 修复：放宽触发条件
+        // - syls >= 5 且候选少（原条件）
+        // - 或 输入 >= 10 字母 且候选少（覆盖漏字导致切分错误的情况）
+        //   例：wandianguoq(11字母漏u) 切分成 4 syls，不满足 syls>=5
+        //   但 fuzzyDeletionMatch 插入 u 后能匹配 wandianguoqu → 晚点过去
+        if (len(syls) >= 5 || len(input) >= 10) && len(candMap) < 3 {
                 e.longDistanceMatch(input, syls, candMap)
         }
 
