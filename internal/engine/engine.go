@@ -856,12 +856,18 @@ func (e *Engine) typoMatch(originalInput string, syls []pinyin.Syllable, out map
                         continue
                 }
                 // 音节数约束：
-                // - 所有类型都允许音节数差 1（单字母替换可能改变切分）
-                //   例：eongcuo(3音节: e ong cuo) 替换 e→r → rongcuo(2音节: rong cuo)
+                // - replace/insert/delete 允许音节数差 1
+                // - transpose 允许音节数差 2（转置可能合并多个音节）
+                //   例：migntianjian(5音节: mi g n tian jian) 转置 gn→ng
+                //       → mingtianjian(3音节: ming tian jian)，sylDelta=-2
+                //       eongcuo(3音节) 替换 e→r → rongcuo(2音节)
                 //       nihoa(3音节) 转置→ nihao(2音节)
-                //       nihaoo(3音节) 删除→ nihao(2音节)
                 sylDelta := len(varSyls) - origSylCount
-                if sylDelta < -1 || sylDelta > 1 {
+                maxDelta := 1
+                if v.Kind == "transpose" {
+                        maxDelta = 2
+                }
+                if sylDelta < -maxDelta || sylDelta > maxDelta {
                         continue
                 }
                 joined := pinyin.Join(varSyls)
