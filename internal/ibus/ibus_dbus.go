@@ -427,11 +427,11 @@ func (ie *IBusEngine) ProcessKeyEvent(keyval, keycode, state uint32) (bool, *dbu
         // 被 ibus 合并/丢失。先清 preedit 状态再 commit，确保信号顺序正确。
         if punct, ok := punctMap[rune(keyval)]; ok {
                 shift := (state & 0x0001) != 0
-                // 基础标点（无需 Shift）在 Shift 时保持英文，方便输入 URL/邮箱/代码
-                basePunct := keyval == '.' || keyval == ',' || keyval == '?' ||
-                        keyval == '!' || keyval == ':' || keyval == ';' ||
-                        keyval == '(' || keyval == ')' || keyval == '\\' ||
-                        keyval == '/' || keyval == '\'' ||
+                // v4 修复：只有"无 Shift 也能输入"的标点在 Shift 时保持英文
+                // ? ! : ; ( ) < > " 等天然需要 Shift 的标点，不再透传——
+                // 有 preedit 时应该选候选词 + 加中文标点
+                basePunct := keyval == '.' || keyval == ',' ||
+                        keyval == '\\' || keyval == '/' || keyval == '\'' ||
                         keyval == '[' || keyval == ']' ||
                         keyval == '{' || keyval == '}'
                 if shift && basePunct {
