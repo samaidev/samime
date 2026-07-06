@@ -268,12 +268,13 @@ func (e *Engine) Search(input string) []Candidate {
 
         // 4.55 长距容错匹配（搜狗核心特性）：处理长距离漏字/错字
         // 例：woyaochfan（漏 i）→ 我要吃饭；woyaochifbn（a→b 错字）→ 我要吃饭
-        // 触发条件（已优化）：
-        //   - 仅在长输入（>=4 音节）且候选很少（<5）时触发
-        //   - 不再对 >=6 音节无条件触发（避免每次长输入都跑 O(n*53) 次切分）
-        // 之前的条件 (syls>=3 && (candMap<25 || syls>=6)) 会让大部分长输入都触发，
-        // 单次查询耗时可达 50-200ms，是出字慢的根因之一。
-        if len(syls) >= 4 && len(candMap) < 5 {
+        // 触发条件（v3 优化）：
+        //   - 仅在长输入（>=5 音节）且候选极少（<3）时触发
+        //   - fuzzyDeletionMatch 对 10 字母输入生成 ~110 个变体做切分，开销大
+        //   - 4 音节输入若已有 exactMatch 结果（candMap>=3），不需要长距容错
+        //   - 之前的条件 (syls>=4 && candMap<5) 会让 woaixuexi 等 4 字输入
+        //     在 fuzzyMatch 限制后触发，导致 p50 从 1ms 飙到 12ms
+        if len(syls) >= 5 && len(candMap) < 3 {
                 e.longDistanceMatch(input, syls, candMap)
         }
 
