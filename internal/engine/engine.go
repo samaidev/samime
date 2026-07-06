@@ -229,7 +229,9 @@ func (e *Engine) Search(input string) []Candidate {
         e.fuzzyMatch(syls, candMap)
 
         // 3. 拼写错误容错（长输入跳过：typo 容错对长句价值低但 O(n*10) 开销大）
-        if len(syls) < 6 {
+        // v4 修复：单字母输入跳过 typoMatch，避免 w→a→啊 这种邻键容错污染
+        //   单字母走 singleInitialMatch 即可（声母联想）
+        if len(syls) >= 2 && len(syls) < 6 {
                 e.typoMatch(input, syls, candMap)
         }
 
