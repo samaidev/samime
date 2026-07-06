@@ -792,23 +792,14 @@ func (ie *IBusEngine) emitSignals() {
 
 	// UpdateAuxiliaryText 信号签名: (vb) —— IBusText variant, visible
 	//
-	// GNOME Shell 的候选窗强制竖排，不遵循 LookupTable 的 orientation=1。
-	// 所以把 "preedit | 候选词" 拼成横向字符串放到 auxiliary text 里显示：
-	//   "nihao | 1.你好 2.拟好 3.利好 4.理好 5.你要"
-	// 这样既能看到自己输入的英文字母（方便改错），又能横向看候选词。
-	// 数字键 1-5 仍通过 ProcessKeyEvent 处理选词，上下方向键仍通过
-	// CursorUp/CursorDown 展开/折叠/翻页。
-	if ie.preedit == "" || len(ie.cands) == 0 {
-		if ie.preedit == "" {
-			ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.HideAuxiliaryText")
-		} else {
-			// 有 preedit 但无候选，只显示 preedit
-			ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.UpdateAuxiliaryText",
-				makeIBusTextVariant(ie.preedit), true)
-		}
+	// inline preedit 已由 UpdatePreeditText 显示在输入框（修了信号签名后生效），
+	// auxiliary 只放候选词，不再重复显示 preedit。
+	// GNOME Shell 的候选窗强制竖排，所以用 auxiliary text 横向显示候选词：
+	//   "1.你好 2.拟好 3.利好 4.理好 5.你要"
+	if len(ie.cands) == 0 {
+		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.HideAuxiliaryText")
 	} else {
-		// preedit 和候选词用换行分隔，分两行显示
-		auxText := ie.preedit + "\n" + ie.buildHorizontalCandidates()
+		auxText := ie.buildHorizontalCandidates()
 		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.UpdateAuxiliaryText",
 			makeIBusTextVariant(auxText), true)
 	}
