@@ -228,8 +228,10 @@ func (e *Engine) Search(input string) []Candidate {
         // 2. 模糊音匹配
         e.fuzzyMatch(syls, candMap)
 
-        // 3. 拼写错误容错
-        e.typoMatch(input, syls, candMap)
+        // 3. 拼写错误容错（长输入跳过：typo 容错对长句价值低但 O(n*10) 开销大）
+        if len(syls) < 6 {
+                e.typoMatch(input, syls, candMap)
+        }
 
         // 3.5 声母遗漏容错（仅对单韵母输入）
         if len(syls) == 1 && pinyin.IsFinal(syls[0].Raw) {
@@ -252,9 +254,10 @@ func (e *Engine) Search(input string) []Candidate {
         // 能处理：
         //   - 漏字：nizanal -> 你在哪里（ni zai na li）
         //   - 混合缩写：wzaiszdn -> 我在深圳等你（w zai s z d n）
-        // 触发条件放宽：长句（>=5 音节）总是触发（搜狗长句核心能力），
-        // 短句候选不足 15 时触发（之前门槛 <5 太高，长句常被短路）
-        if len(syls) >= 5 || len(candMap) < 15 {
+        // 触发条件（已优化）：仅在长句（>=6 音节）且候选很少（<8）时触发。
+        // 旧条件 (syls>=5 || candMap<15) 会让 3 字输入就触发，collectSplits
+        // 递归枚举 50-80 种切分 × greedyMatchSentence，导致 50-200ms 卡顿。
+        if len(syls) >= 6 && len(candMap) < 8 {
                 e.sentenceMatch(input, candMap)
         }
 

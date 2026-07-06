@@ -145,6 +145,11 @@ func (e *Engine) ExpandAll(syllables []string) [][]string {
 // ExpandAllWithCount 对多个音节展开，返回所有组合及模糊音节数
 // fuzzyCount 表示该组合中有几个音节被模糊（用于分级评分）
 // 模糊音节越少，匹配度越高（搜狗的模糊距离分级）
+// maxFuzzySyllables 限制模糊音展开的最多模糊音节数
+// 避免长输入时笛卡尔积爆炸：9音节 × 每节3变体 = 3^9 ≈ 20000 组合
+// 限制为2个模糊音节后：C(9,0) + C(9,1)*2 + C(9,2)*4 ≈ 1+18+144 = 163 组合
+const maxFuzzySyllables = 2
+
 func (e *Engine) ExpandAllWithCount(syllables []string) []FuzzyCombo {
         if len(syllables) == 0 {
                 return nil
@@ -183,18 +188,23 @@ func (e *Engine) ExpandAllWithCount(syllables []string) []FuzzyCombo {
                 }
                 expanded[i] = variants
         }
-        // 笛卡尔积
+        // 笛卡尔积（带模糊音节数上限，避免组合爆炸）
         result := []FuzzyCombo{{Syls: nil, FuzzyCount: 0}}
         for _, ex := range expanded {
                 var newResult []FuzzyCombo
                 for _, r := range result {
                         for _, v := range ex {
+                                fuzzyCount := r.FuzzyCount
+                                if v.fuzzy {
+                                        fuzzyCount++
+                                }
+                                // 跳过超过模糊音节数上限的组合
+                                if fuzzyCount > maxFuzzySyllables {
+                                        continue
+                                }
                                 rr := FuzzyCombo{
                                         Syls:       append(append([]string(nil), r.Syls...), v.s),
-                                        FuzzyCount: r.FuzzyCount,
-                                }
-                                if v.fuzzy {
-                                        rr.FuzzyCount++
+                                        FuzzyCount: fuzzyCount,
                                 }
                                 newResult = append(newResult, rr)
                         }
