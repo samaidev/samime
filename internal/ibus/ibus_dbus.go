@@ -783,22 +783,42 @@ func (ie *IBusEngine) emitSignals() {
 		// 清空预编辑
 		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.HidePreeditText")
 	} else {
-		// UpdatePreeditText: 拼音字母显示在光标位置的输入框（inline preedit）
+		// UpdatePreeditText 信号签名: (vuu) —— IBusText variant, cursor_pos, visible
+		// 注意：GNOME Shell 把 preedit 和 auxiliary text 显示在同一区域，
+		// auxiliary 会覆盖 preedit。这里仍发 preedit（兼容某些 IBus 前端），
+		// 但实际显示靠下面的 auxiliary text（preedit + 候选词）。
 		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.UpdatePreeditText",
 			makeIBusTextVariant(ie.preedit), uint32(len(ie.preedit)), true)
 	}
 
-	// UpdateAuxiliaryText: 候选词横向显示在下方独立一排（不含 preedit）
-	// preedit 已由 UpdatePreeditText 显示在输入框，这里只放候选词
-	if len(ie.cands) == 0 {
-		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.HideAuxiliaryText")
+	// UpdateAuxiliaryText 信号签名: (vb) —— IBusText variant, visible
+	//
+	// GNOME Shell 的候选窗强制竖排，不遵循 LookupTable 的 orientation=1。
+	// 所以把 "preedit | 候选词" 拼成横向字符串放到 auxiliary text 里显示：
+	//   "nihao | 1.你好 2.拟好 3.利好 4.理好 5.你要"
+	// 这样既能看到自己输入的英文字母（方便改错），又能横向看候选词。
+	// 数字键 1-5 仍通过 ProcessKeyEvent 处理选词，上下方向键仍通过
+	// CursorUp/CursorDown 展开/折叠/翻页。
+	if ie.preedit == "" || len(ie.cands) == 0 {
+		if ie.preedit == "" {
+			ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.HideAuxiliaryText")
+		} else {
+			// 有 preedit 但无候选，只显示 preedit
+			ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.UpdateAuxiliaryText",
+				makeIBusTextVariant(ie.preedit), true)
+		}
 	} else {
-		auxText := ie.buildHorizontalCandidates()
+		auxText := ie.preedit + " | " + ie.buildHorizontalCandidates()
 		ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.UpdateAuxiliaryText",
 			makeIBusTextVariant(auxText), true)
 	}
 
-	// 隐藏 ibus 自带候选窗（GNOME Shell 强制竖排，用 auxiliary 横排替代）
+	// UpdateLookupTable 信号签名: (vb) —— IBusLookupTable variant, visible
+	//
+	// 完全隐藏 ibus 自带的候选窗（GNOME Shell 强制竖排，没法改成横排）。
+	// 候选词改由上面的 UpdateAuxiliaryText 横向显示。
+	// 方向键导航改由 ProcessKeyEvent 自己捕获（见 ProcessKeyEvent 里的
+	// GDK_KEY_Up/Down 处理），不再依赖 ibus 候选窗的 CursorUp/Down。
 	ie.conn.Emit(ie.objPath, "org.freedesktop.IBus.Engine.HideLookupTable")
 }
 
