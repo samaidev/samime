@@ -264,9 +264,11 @@ func (e *Engine) Search(input string) []Candidate {
         }
 
         // 4.55 长距容错匹配（搜狗核心特性）：处理长距离漏字/错字
-        // 例：woyaochfan（漏 i）→ 我要吃饭；wyacf（首字母缩写）→ 我要吃饭
-        // 触发条件：长输入（>=3 音节）+ 候选不足 20 时
-        if len(syls) >= 3 && len(candMap) < 20 {
+        // 例：woyaochfan（漏 i）→ 我要吃饭；woyaochifbn（a→b 错字）→ 我要吃饭
+        // 触发条件：长输入（>=3 音节）时触发
+        // - 候选不足 25 时触发（短句容错）
+        // - 长句（>=6 音节）总是触发（搜狗长句核心能力，无论候选多少）
+        if len(syls) >= 3 && (len(candMap) < 25 || len(syls) >= 6) {
                 e.longDistanceMatch(input, syls, candMap)
         }
 
@@ -1595,42 +1597,63 @@ func (e *Engine) longDistanceMatch(input string, syls []pinyin.Syllable, out map
 	}
 }
 
-// fuzzyDeletionMatch 漏字容错：尝试在输入每个位置插入 1 个字母
-// 例：woyaochfan → 尝试在每个位置插入 a-z → 找到 woyaochifan → 我要吃饭
+// fuzzyDeletionMatch 长距容错匹配（搜狗核心特性）
 //
-// 实现说明：插入字母后，直接调用 segmentMatch 做 DP 切分 + bigram 评分，
-// 因为很多整句（如"我要吃饭"）不在词典整词索引里，需要切分匹配。
+// 处理长距离的输入错误，支持三种操作：
+//   - 漏字（插入）：woyaochfan → 插入 i → woyaochifan → 我要吃饭
+//   - 错字（替换）：woyaochifbn → 替换 b→a → woyaochifan → 我要吃饭
+//   - 多打（删除）：woyaochifanx → 删除 x → woyaochifan → 我要吃饭
+//
+// 算法：对输入串每个位置尝试插入/替换/删除 1 个字母，生成容错变体，
+// 用 segmentMatch 做 DP 切分 + bigram 评分，收集 Top-N 候选。
+//
+// 复杂度控制：
+//   - 插入：O(n*26) 次切分
+//   - 替换：O(n*26) 次切分
+//   - 删除：O(n) 次切分
+//   - 总共约 O(n*53) 次切分，n=10 时约 530 次，可接受
+//
+// 评分：容错匹配分数 * 0.95（略低于正常匹配，但能竞争）
 func (e *Engine) fuzzyDeletionMatch(input string, out map[string]*Candidate) {
 	if len(input) < 5 || len(input) > 20 {
 		return
 	}
 
 	// 收集所有容错后的候选词及其最高分
-	type cand struct {
-		word  string
-		score float64
-	}
 	candMap := make(map[string]float64)
 
 	letters := "abcdefghijklmnopqrstuvwxyz"
-	for i := 1; i < len(input); i++ {
-		for _, c := range letters {
+
+	// 策略 1：插入元音（漏字容错）——漏字通常是漏元音
+	// 只插 5 个元音字母（而非 26 个），变体数量减少 5 倍
+	// 例：woyaochfan → 插入 i → woyaochifan
+	vowels := "aeiou"
+	for i := 1; i <= len(input); i++ {
+		for _, c := range vowels {
 			newInput := input[:i] + string(c) + input[i:]
-			newSyls := pinyin.Segment(newInput)
-			if len(newSyls) < 2 {
-				continue
-			}
-			// 用 segmentMatch 做 DP 切分 + bigram 评分
-			// 把结果临时收集到 tempMap
-			tempMap := make(map[string]*Candidate)
-			e.segmentMatch(newSyls, tempMap)
-			// 合并到 candMap，记录最高分
-			for _, cand := range tempMap {
-				if existing, ok := candMap[cand.Word]; !ok || cand.Score > existing {
-					candMap[cand.Word] = cand.Score
-				}
-			}
+			e.tryFuzzyVariant(newInput, candMap)
 		}
+	}
+
+	// 策略 2：替换（错字容错）——搜狗核心能力
+	// 例：woyaochifbn → 替换 b→a → woyaochifan
+	// 例：woyaoxhifan → 替换 x→c → woyaochifan
+	for i := 0; i < len(input); i++ {
+		orig := input[i]
+		for _, c := range letters {
+			if byte(c) == orig {
+				continue // 跳过相同字母
+			}
+			newInput := input[:i] + string(c) + input[i+1:]
+			e.tryFuzzyVariant(newInput, candMap)
+		}
+	}
+
+	// 策略 3：删除（多打字容错）
+	// 例：woyaochifanx → 删除 x → woyaochifan
+	for i := 0; i < len(input); i++ {
+		newInput := input[:i] + input[i+1:]
+		e.tryFuzzyVariant(newInput, candMap)
 	}
 
 	// 按分数排序，取 Top-N 加入输出
@@ -1647,16 +1670,14 @@ func (e *Engine) fuzzyDeletionMatch(input string, out map[string]*Candidate) {
 		return sorted[i].score > sorted[j].score
 	})
 	for _, p := range sorted {
-		if added >= 8 {
+		if added >= 15 {
 			break
 		}
 		key := p.word + "|"
 		if _, exists := out[key]; exists {
 			continue
 		}
-		// 容错匹配分数：与正常 sentence 匹配持平（不打折，让正确容错候选能竞争）
-		// 之前 *0.7 导致"我要吃饭"(52.8)被"我要吃反"(60)压过
-		// 这里用 *0.95，略低于正常匹配但能竞争
+		// 容错匹配分数：略低于正常匹配（*0.95），但能竞争
 		score := p.score * 0.95
 		out[key] = &Candidate{
 			Word:   p.word,
@@ -1666,6 +1687,95 @@ func (e *Engine) fuzzyDeletionMatch(input string, out map[string]*Candidate) {
 		}
 		added++
 	}
+}
+
+// tryFuzzyVariant 对容错变体做切分匹配，把结果合并到 candMap
+// 评分 = segmentMatch 基础分 + 词典词组覆盖度加成（核心）+ 整句 bigram 连贯性加成
+//
+// 搜狗长句错字容错的核心思路：正确的整句能被词典中的多个连续词组覆盖，且整句连贯。
+// 例："我要去博物馆"包含词组"我要"+"要去"+"博物馆"等，且 bigram 连贯 → 高分
+//     "我要去不无关"虽包含"不无"+"无关"+"不无关"等词组，但 bigram 不连贯 → 低分
+// 这样即使基础分相同（如都 70），正确整句也能从相同分的候选中脱颖而出。
+//
+// 性能优化：
+//   - 快速过滤：音节数 < 3 直接跳过（过滤大部分无效变体）
+//   - 快速路径：整词在词典中直接用 dict.Lookup（避免 segmentMatch 的 DP 开销）
+//   - 慢速路径：整词不在词典才用 segmentMatch 做切分
+func (e *Engine) tryFuzzyVariant(newInput string, candMap map[string]float64) {
+	newSyls := pinyin.Segment(newInput)
+	if len(newSyls) < 3 {
+		return // 快速过滤：音节数太少的不处理
+	}
+	joined := pinyin.Join(newSyls)
+
+	// 计算评分加成的辅助闭包
+	computeBonus := func(word string, baseScore float64) float64 {
+		coverageBonus := e.wordCoverageBonus(word)
+		sentenceBonus := 0.0
+		if e.segmenter.HasBigram() {
+			lp := e.segmenter.BigramSentenceLogProb([]string{word})
+			if lp > -50 {
+				sentenceBonus = (50 + lp) * 1.5
+				if sentenceBonus < 0 {
+					sentenceBonus = 0
+				}
+			}
+		}
+		return baseScore + coverageBonus + sentenceBonus
+	}
+
+	// 快速路径：整词在词典中，直接用（避免 segmentMatch 开销）
+	if entries := e.dict.Lookup(joined); len(entries) > 0 {
+		for _, ent := range entries {
+			baseScore := e.wPinyinMatch + ent.Freq*e.wFreq
+			finalScore := computeBonus(ent.Word, baseScore)
+			if existing, ok := candMap[ent.Word]; !ok || finalScore > existing {
+				candMap[ent.Word] = finalScore
+			}
+		}
+		return
+	}
+
+	// 慢速路径：整词不在词典，用 segmentMatch 做 DP 切分
+	tempMap := make(map[string]*Candidate)
+	e.segmentMatch(newSyls, tempMap)
+	for _, cand := range tempMap {
+		finalScore := computeBonus(cand.Word, cand.Score)
+		if existing, ok := candMap[cand.Word]; !ok || finalScore > existing {
+			candMap[cand.Word] = finalScore
+		}
+	}
+}
+
+// wordCoverageBonus 计算候选词中"词典词组覆盖度"加分
+// 把候选词按 2-4 字滑窗扫描，统计命中词典的词组数量，越长权重越高
+// 这是搜狗长句容错的关键评分：正确整句能被词典多个连续词组覆盖
+func (e *Engine) wordCoverageBonus(word string) float64 {
+	chars := []rune(word)
+	n := len(chars)
+	if n < 2 {
+		return 0
+	}
+	var bonus float64
+	// 2-字词组：每个命中 +6
+	for i := 0; i+2 <= n; i++ {
+		if e.dict.HasWord(string(chars[i : i+2])) {
+			bonus += 6.0
+		}
+	}
+	// 3-字词组：每个命中 +10（更长的词组权重更高）
+	for i := 0; i+3 <= n; i++ {
+		if e.dict.HasWord(string(chars[i : i+3])) {
+			bonus += 10.0
+		}
+	}
+	// 4-字词组：每个命中 +14（成语/常用短语）
+	for i := 0; i+4 <= n; i++ {
+		if e.dict.HasWord(string(chars[i : i+4])) {
+			bonus += 14.0
+		}
+	}
+	return bonus
 }
 
 // longAcronymMatch 长首字母缩写整句匹配
