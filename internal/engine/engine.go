@@ -813,20 +813,13 @@ func (e *Engine) typoMatch(originalInput string, syls []pinyin.Syllable, out map
                         continue
                 }
                 // 音节数约束：
-                // - replace 不改变长度，音节数应一致
-                // - transpose/insert/delete 可能改变切分，允许音节数差 1
-                //   例：nihoa(3音节) 转置→ nihao(2音节)
+                // - 所有类型都允许音节数差 1（单字母替换可能改变切分）
+                //   例：eongcuo(3音节: e ong cuo) 替换 e→r → rongcuo(2音节: rong cuo)
+                //       nihoa(3音节) 转置→ nihao(2音节)
                 //       nihaoo(3音节) 删除→ nihao(2音节)
                 sylDelta := len(varSyls) - origSylCount
-                switch v.Kind {
-                case "replace":
-                        if sylDelta != 0 {
-                                continue
-                        }
-                default: // transpose, delete, insert
-                        if sylDelta < -1 || sylDelta > 1 {
-                                continue
-                        }
+                if sylDelta < -1 || sylDelta > 1 {
+                        continue
                 }
                 joined := pinyin.Join(varSyls)
                 entries := e.dict.Lookup(joined)
