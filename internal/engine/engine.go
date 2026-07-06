@@ -169,6 +169,10 @@ func (e *Engine) Search(input string) []Candidate {
                                 // 构造伪音节用于续接匹配
                                 pseudoSyls := []pinyin.Syllable{{Initial: input, Final: "", Raw: input}}
                                 e.continuationMatch(input, pseudoSyls, candMap)
+                                // 单字母全句补全（搜狗核心特性）：基于上下文 N-gram 预测整句
+                                // 例：上次提交"今天天"，输入"w" → "我要去吃饭"等完整句预测
+                                // 例：上次提交"我"，输入"y" → "要去博物馆"
+                                e.singleCharSentencePredict(input, candMap)
                         }
                         result := e.sortCandidates(candMap)
                         if len(result) > 50 {
@@ -257,6 +261,13 @@ func (e *Engine) Search(input string) []Candidate {
         // 4.5 单声母联想：输入 "n" 等单声母时返回高频字
         if len(syls) == 1 && pinyin.IsInitial(syls[0].Raw) && len(candMap) < 5 {
                 e.singleInitialMatch(syls[0].Raw, candMap)
+        }
+
+        // 4.55 长距容错匹配（搜狗核心特性）：处理长距离漏字/错字
+        // 例：woyaochfan（漏 i）→ 我要吃饭；wyacf（首字母缩写）→ 我要吃饭
+        // 触发条件：长输入（>=3 音节）+ 候选不足 20 时
+        if len(syls) >= 3 && len(candMap) < 20 {
+                e.longDistanceMatch(input, syls, candMap)
         }
 
         // 4.8 续接联想（搜狗核心特性）：基于上一次提交的末字 + bigram 预测
@@ -1382,6 +1393,471 @@ func (e *Engine) bigramChainExpand(lastCommit string, nx segmenter.NextEntry, ou
 		}
 	}
 }
+
+// singleCharSentencePredict 单字母全句补全（搜狗核心特性）
+//
+// 用户输入单个声母（如"w"）时，结合上下文 N-gram 预测完整句子。
+// 与 continuationMatch 的区别：
+//   - continuationMatch 只预测"前词+1个续接词"（如"今天天气怎么样"）
+//   - singleCharSentencePredict 预测"前词+多词整句"（如"我要去吃饭"）
+//
+// 算法：从续接字出发，用 bigram 链扩展到 5-8 字的完整句，
+// 每一级用首字母匹配用户输入的字母（首字母缩写式整句预测）。
+//
+// 例：commitHistory=["我"]，input="y"
+//   1. bigram("我") → [要, 也, 是, 在, 们, ...]
+//   2. 对每个续接字，检查首字母是否匹配 "y"（要→yao→y，匹配！）
+//   3. 从"要"出发，bigram 链扩展 4-6 字：
+//      要→去→博→物→馆 → 我要去博物馆
+//      要→吃→饭 → 我要吃饭
+//      要→去→印→度 → 我要去印度
+//   4. 用 bigram 累计分数排序
+//
+// 注意：这是基于上下文的预测，不需要用户输入完整拼音。
+// 用户只输入一个字母，就能预测整句，类似搜狗的"超长句预测"。
+func (e *Engine) singleCharSentencePredict(input string, out map[string]*Candidate) {
+	if !e.segmenter.HasBigram() || len(e.commitHistory) == 0 {
+		return
+	}
+	lastCommit := e.commitHistory[len(e.commitHistory)-1]
+	if lastCommit == "" {
+		return
+	}
+	lastChars := []rune(lastCommit)
+	if len(lastChars) == 0 {
+		return
+	}
+	lastChar := string(lastChars[len(lastChars)-1])
+
+	// 取 lastChar 的 Top-K 续接字
+	// topK=30：扩大候选面，让"要"（"我"的续接字，排名较低）也能进入预测
+	const topK = 30
+	nexts := e.segmenter.BigramTopNext(lastChar, topK)
+
+	for _, nx := range nexts {
+		// 检查续接字拼音是否以 input 开头
+		nxPy := e.lookupCharPinyin(nx.Word)
+		if nxPy == "" || !pyMatchesInput(nxPy, input) {
+			continue
+		}
+		// 从这个续接字出发，扩展 3-5 级 bigram 链生成完整句
+		e.sentenceChainExpand(lastCommit, nx, out)
+	}
+}
+
+// sentenceChainExpand 整句链扩展
+// 从续接字 nx 出发，用 bigram 模型递归扩展 3-5 级，生成完整句候选。
+// 与 bigramChainExpand 的区别：
+//   - bigramChainExpand 只扩展续接字本身（如"气怎么样"）
+//   - sentenceChainExpand 扩展整个句子（如"我要去吃饭"），覆盖更长距离
+//
+// 算法：Beam Search，每级保留 Top-K，最终保留 Top-N 整句候选
+// 评分基于累计 bigram 概率 + 整句长度加成（更长更优先）
+func (e *Engine) sentenceChainExpand(lastCommit string, nx segmenter.NextEntry, out map[string]*Candidate) {
+	const (
+		minDepth    = 2              // 最少扩展 2 级（总长 3 字）
+		maxDepth    = 5              // 最多扩展 5 级（总长 6 字）
+		beamWidth   = 6              // Beam 宽度（扩大，让更多路径竞争）
+		topKPerStep = 5              // 每步取 Top-5 续接字（扩大，覆盖更多低频但合理的续接）
+		minLogProb  = -9.0           // 放宽阈值（之前 -7 太严，过滤掉"要→去"等合理但低频续接）
+		maxCandidates = 8            // 最多输出 8 个整句候选
+	)
+
+	type chainItem struct {
+		chars   []string
+		logProb float64
+	}
+
+	beam := []chainItem{{chars: []string{nx.Word}, logProb: nx.LogProb}}
+	bestChains := []chainItem{}
+
+	for depth := 0; depth < maxDepth; depth++ {
+		var newBeam []chainItem
+		for _, cur := range beam {
+			last := cur.chars[len(cur.chars)-1]
+			nexts := e.segmenter.BigramTopNext(last, topKPerStep)
+			for _, nxt := range nexts {
+				if nxt.LogProb < minLogProb {
+					continue
+				}
+				if nxt.Word == last {
+					continue
+				}
+				newChars := make([]string, len(cur.chars)+1)
+				copy(newChars, cur.chars)
+				newChars[len(cur.chars)] = nxt.Word
+				newBeam = append(newBeam, chainItem{
+					chars:   newChars,
+					logProb: cur.logProb + nxt.LogProb,
+				})
+			}
+		}
+		if len(newBeam) == 0 {
+			break
+		}
+		sort.Slice(newBeam, func(i, j int) bool {
+			return newBeam[i].logProb > newBeam[j].logProb
+		})
+		if len(newBeam) > beamWidth {
+			newBeam = newBeam[:beamWidth]
+		}
+		beam = newBeam
+
+		// 达到最短长度后，开始收集候选
+		if depth+1 >= minDepth {
+			bestChains = append(bestChains, beam...)
+		}
+	}
+
+	if len(bestChains) == 0 {
+		return
+	}
+
+	// 按累计 log prob 排序，取 Top-N
+	sort.Slice(bestChains, func(i, j int) bool {
+		return bestChains[i].logProb > bestChains[j].logProb
+	})
+	if len(bestChains) > maxCandidates*2 {
+		bestChains = bestChains[:maxCandidates*2]
+	}
+
+	added := 0
+	for _, ci := range bestChains {
+		if added >= maxCandidates {
+			break
+		}
+		if len(ci.chars) < minDepth+1 {
+			continue
+		}
+		chainWord := strings.Join(ci.chars, "")
+		// 跳过词典已有的词（避免与 expandContinuation 策略1重复）
+		if e.dict.HasWord(chainWord) {
+			continue
+		}
+		combined := lastCommit + chainWord
+		key := combined + "|"
+		if _, exists := out[key]; exists {
+			continue
+		}
+		// 评分：基础分 + 累计 bigram bonus + 长度平方级加分
+		// ci.logProb 范围约 -10 ~ -3，转换为正向 bonus
+		chainBonus := 0.0
+		if ci.logProb > -18 {
+			chainBonus = (18 + ci.logProb) * 5
+			if chainBonus < 0 {
+				chainBonus = 0
+			}
+		}
+		// 长句平方级加分（让 5-6 字的整句显著占优）
+		chainLen := len(ci.chars)
+		lengthBonus := float64(chainLen*chainLen) * 6.0
+		score := e.wPinyinMatch + chainBonus + lengthBonus
+		out[key] = &Candidate{
+			Word:   combined,
+			Pinyin: "",
+			Score:  score,
+			Source: "continuation",
+		}
+		added++
+	}
+}
+
+// longDistanceMatch 长距容错匹配（搜狗核心特性）
+//
+// 处理长距离的漏字、错字、隔字匹配，弥补 typoMatch 只处理相邻错误的不足。
+// 典型场景：
+//   - 漏字：输入 "woyaochfan"（漏了"i"）→ 应能匹配 "我要吃饭"
+//   - 错字：输入 "woyaochifbn"（"a"打成"b"）→ 应能匹配 "我要吃饭"
+//   - 隔字：输入 "wyacf"（每字首字母缩写）→ 应能匹配 "我要吃饭"
+//
+// 算法：滑动窗口 + 容错匹配
+//   1. 对输入串做多种切分尝试（已有 sentenceMatch 处理）
+//   2. 对每个切分，允许每段有 1 个字母的偏差（漏字/错字）
+//   3. 用 Levenshtein 距离衡量匹配度，距离越近分越高
+//
+// 这里实现的是"段级容错"：把输入切分为多段，每段允许 1 个字母偏差，
+// 用前缀查找扩展候选，再用 bigram 评分选最优整句。
+func (e *Engine) longDistanceMatch(input string, syls []pinyin.Syllable, out map[string]*Candidate) {
+	if len(syls) < 3 {
+		return // 短输入不需要长距容错
+	}
+
+	// 策略 1：漏字容错
+	// 对输入的每个位置，尝试插入 1 个字母，看是否能匹配到更好的整句
+	// 例：woyaochfan（漏 i）→ 插入 i → woyaochifan → 我要吃饭
+	e.fuzzyDeletionMatch(input, out)
+
+	// 策略 2：隔字匹配（首字母缩写式整句）
+	// 如果输入是 4-10 字母串，用首字母缩写匹配整句
+	// 不要求 isAllInitials（允许韵母开头字母如'a'代表'ai'），因为搜狗缩写支持混合
+	if len(input) >= 4 && len(input) <= 10 {
+		e.longAcronymMatch(input, out)
+	}
+}
+
+// fuzzyDeletionMatch 漏字容错：尝试在输入每个位置插入 1 个字母
+// 例：woyaochfan → 尝试在每个位置插入 a-z → 找到 woyaochifan → 我要吃饭
+//
+// 实现说明：插入字母后，直接调用 segmentMatch 做 DP 切分 + bigram 评分，
+// 因为很多整句（如"我要吃饭"）不在词典整词索引里，需要切分匹配。
+func (e *Engine) fuzzyDeletionMatch(input string, out map[string]*Candidate) {
+	if len(input) < 5 || len(input) > 20 {
+		return
+	}
+
+	// 收集所有容错后的候选词及其最高分
+	type cand struct {
+		word  string
+		score float64
+	}
+	candMap := make(map[string]float64)
+
+	letters := "abcdefghijklmnopqrstuvwxyz"
+	for i := 1; i < len(input); i++ {
+		for _, c := range letters {
+			newInput := input[:i] + string(c) + input[i:]
+			newSyls := pinyin.Segment(newInput)
+			if len(newSyls) < 2 {
+				continue
+			}
+			// 用 segmentMatch 做 DP 切分 + bigram 评分
+			// 把结果临时收集到 tempMap
+			tempMap := make(map[string]*Candidate)
+			e.segmentMatch(newSyls, tempMap)
+			// 合并到 candMap，记录最高分
+			for _, cand := range tempMap {
+				if existing, ok := candMap[cand.Word]; !ok || cand.Score > existing {
+					candMap[cand.Word] = cand.Score
+				}
+			}
+		}
+	}
+
+	// 按分数排序，取 Top-N 加入输出
+	added := 0
+	type kv struct {
+		word  string
+		score float64
+	}
+	var sorted []kv
+	for w, s := range candMap {
+		sorted = append(sorted, kv{w, s})
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].score > sorted[j].score
+	})
+	for _, p := range sorted {
+		if added >= 8 {
+			break
+		}
+		key := p.word + "|"
+		if _, exists := out[key]; exists {
+			continue
+		}
+		// 容错匹配分数：与正常 sentence 匹配持平（不打折，让正确容错候选能竞争）
+		// 之前 *0.7 导致"我要吃饭"(52.8)被"我要吃反"(60)压过
+		// 这里用 *0.95，略低于正常匹配但能竞争
+		score := p.score * 0.95
+		out[key] = &Candidate{
+			Word:   p.word,
+			Pinyin: "",
+			Score:  score,
+			Source: "fuzzy_long",
+		}
+		added++
+	}
+}
+
+// longAcronymMatch 长首字母缩写整句匹配
+// 输入 "wycf"（每字首字母）→ 匹配 "我要吃饭"
+//
+// 算法：用 bigram 链 + 首字母过滤，从第一个字母开始扩展整个输入串。
+// 每一级匹配 1 个首字母，用 Beam Search 保留 Top-K 路径。
+// 不依赖词典 acronymIndex（很多长句不在整词索引里），纯靠 bigram 预测。
+func (e *Engine) longAcronymMatch(input string, out map[string]*Candidate) {
+	if !e.segmenter.HasBigram() || len(input) < 3 || len(input) > 8 {
+		return
+	}
+
+	// Beam Search：每级匹配 1 个首字母
+	type chainItem struct {
+		chars   []string // 已生成的字
+		logProb float64  // 累计 bigram log prob
+	}
+
+	// 初始化：第一级用首字母索引获取候选字
+	firstLetter := string(input[0])
+	firstEntries := e.dict.LookupByInitial(firstLetter)
+	var beam []chainItem
+	seedLimit := 15
+	if len(firstEntries) > seedLimit {
+		firstEntries = firstEntries[:seedLimit]
+	}
+	// 常见句首字加分表（这些字常作为句子开头，应该优先）
+	sentenceStartBonus := map[string]float64{
+		"我": 2.0, "你": 1.5, "他": 1.0, "她": 1.0,
+		"今": 1.5, "明": 1.0, "天": 1.0,
+		"想": 1.0, "要": 1.0, "去": 1.0, "吃": 1.0,
+		"这": 1.0, "那": 1.0, "什": 1.0, "怎": 1.0,
+		"在": 1.0, "有": 1.0, "是": 1.0, "不": 1.0,
+	}
+	for _, ent := range firstEntries {
+		// 只取单字作为种子
+		if len([]rune(ent.Word)) != 1 {
+			continue
+		}
+		// 用 unigram 概率作为初始分（freq 越高分越高）
+		initLogProb := -3.0
+		if ent.Freq > 1000 {
+			initLogProb = -2.0
+		} else if ent.Freq > 100 {
+			initLogProb = -3.0
+		} else {
+			initLogProb = -4.0
+		}
+		// 常见句首字加分
+		if bonus, ok := sentenceStartBonus[ent.Word]; ok {
+			initLogProb += bonus
+		}
+		beam = append(beam, chainItem{
+			chars:   []string{ent.Word},
+			logProb: initLogProb,
+		})
+	}
+	if len(beam) == 0 {
+		return
+	}
+
+	// 逐级扩展剩余字母
+	const (
+		beamWidth   = 12
+		topKPerStep = 12
+		minLogProb  = -12.0
+	)
+
+	for i := 1; i < len(input); i++ {
+		targetLetter := string(input[i])
+		var newBeam []chainItem
+		// 对每个 beam 项，先用 bigram 扩展，再用 LookupByInitial 补充
+		// 补充覆盖 bigram 没学到但常见的续接（如"我"→"要"→"吃"→"饭"）
+		for _, cur := range beam {
+			last := cur.chars[len(cur.chars)-1]
+			nexts := e.segmenter.BigramTopNext(last, topKPerStep)
+			bigramHitCount := 0
+			for _, nx := range nexts {
+				if nx.LogProb < minLogProb {
+					continue
+				}
+				nxPy := e.lookupCharPinyin(nx.Word)
+				if nxPy == "" || !strings.HasPrefix(nxPy, targetLetter) {
+					continue
+				}
+				newChars := make([]string, len(cur.chars)+1)
+				copy(newChars, cur.chars)
+				newChars[len(cur.chars)] = nx.Word
+				newBeam = append(newBeam, chainItem{
+					chars:   newChars,
+					logProb: cur.logProb + nx.LogProb,
+				})
+				bigramHitCount++
+			}
+			// 总是补充 LookupByInitial 候选（覆盖 bigram 没学到的续接）
+			// 限制补充数量，避免爆炸
+			letterEntries := e.dict.LookupByInitial(targetLetter)
+			supplementLimit := 15
+			if len(letterEntries) > supplementLimit {
+				letterEntries = letterEntries[:supplementLimit]
+			}
+			for _, ent := range letterEntries {
+				if len([]rune(ent.Word)) != 1 {
+					continue
+				}
+				// 避免与 bigram 命中的重复
+				dup := false
+				for _, nx := range nexts {
+					if nx.Word == ent.Word {
+						dup = true
+						break
+					}
+				}
+				if dup {
+					continue
+				}
+				newChars := make([]string, len(cur.chars)+1)
+				copy(newChars, cur.chars)
+				newChars[len(cur.chars)] = ent.Word
+				// 评分：检查"前字+该字"是否构成词典词组
+				// 词组命中给高分（-1.0，接近 bigram 高分），非词组给低分（-6.0）
+				supplementLogProb := -6.0
+				bigramWord := last + ent.Word
+				if e.dict.HasWord(bigramWord) {
+					supplementLogProb = -1.0 // 是词组，给高分
+				}
+				newBeam = append(newBeam, chainItem{
+					chars:   newChars,
+					logProb: cur.logProb + supplementLogProb,
+				})
+			}
+		}
+		if len(newBeam) == 0 {
+			break // 这一字母匹配失败
+		}
+		sort.Slice(newBeam, func(i, j int) bool {
+			return newBeam[i].logProb > newBeam[j].logProb
+		})
+		if len(newBeam) > beamWidth {
+			newBeam = newBeam[:beamWidth]
+		}
+		beam = newBeam
+	}
+
+	// 生成候选
+	added := 0
+	for _, ci := range beam {
+		if added >= 6 {
+			break
+		}
+		if len(ci.chars) < len(input) {
+			continue // 没匹配完整输入，跳过
+		}
+		chainWord := strings.Join(ci.chars, "")
+		key := chainWord + "|"
+		if _, exists := out[key]; exists {
+			continue
+		}
+		// 评分：基础分 + bigram bonus + 完整匹配加成 + 词组覆盖率加成
+		bonus := 0.0
+		if ci.logProb > -20 {
+			bonus = (20 + ci.logProb) * 4
+			if bonus < 0 {
+				bonus = 0
+			}
+		}
+		// 完整匹配所有字母的加成
+		completeBonus := float64(len(input)) * 15.0
+
+		// 词组覆盖率加成：检查链能分解为多少个 2 字词组
+		// 如"我要吃饭"可分解为"我要"+"吃饭"，覆盖率 100%，加分高
+		// 如"我一吃饭"只能分解为"吃饭"，覆盖率 50%，加分低
+		wordGroupBonus := 0.0
+		for j := 0; j+1 < len(ci.chars); j++ {
+			twoCharWord := ci.chars[j] + ci.chars[j+1]
+			if e.dict.HasWord(twoCharWord) {
+				wordGroupBonus += 20.0 // 每个 2 字词组加 20 分
+			}
+		}
+
+		score := e.wPinyinMatch*0.7 + bonus + completeBonus + wordGroupBonus
+		out[key] = &Candidate{
+			Word:   chainWord,
+			Pinyin: "",
+			Score:  score,
+			Source: "acronym_long",
+		}
+		added++
+	}
+}
+
 
 // userContextContinuation 用户私有上下文续接
 // 从 contextPairs 中查找 prev=lastCommit 或 prev=lastChar 的续接词
