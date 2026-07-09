@@ -39,7 +39,9 @@ class GoEngineClient {
             let pathBytes = self.socketPath.utf8CString
             withUnsafeMutablePointer(to: &addr.sun_path) {
                 $0.withMemoryRebound(to: CChar.self, capacity: pathBytes.count) {
-                    strcpy($0, pathBytes)
+                    pathBytes.withUnsafeBufferPointer { bp in
+                        strcpy($0, bp.baseAddress!)
+                    }
                 }
             }
 
@@ -94,7 +96,9 @@ class GoEngineClient {
         var buf = [UInt8](repeating: 0, count: 65536)
         var total = 0
         while total < buf.count - 1 {
-            let n = Darwin.recv(socket, &buf + total, buf.count - 1 - total, 0)
+            let n = buf.withUnsafeMutableBufferPointer { bp -> Int in
+                Darwin.recv(socket, bp.baseAddress! + total, buf.count - 1 - total, 0)
+            }
             if n <= 0 { break }
             total += n
             if buf[total - 1] == UInt8(ascii: "\n") { break }
