@@ -29,7 +29,7 @@ class GoEngineClient {
     }
 
     func connect() -> Bool {
-        return queue.sync {
+        return queue.sync { () -> Bool in
             if connected { return true }
             socket = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
             if socket < 0 { return false }
