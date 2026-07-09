@@ -554,16 +554,6 @@ class SamimeServer {
 // MARK: - main 入口
 // IMK 输入法 app 需要自己的 main，启动 IMK server 并运行 NSApplication
 
-@main
-struct SamimeMain {
-    static func main() {
-        let app = NSApplication.shared
-        let delegate = SamimeAppDelegate()
-        app.delegate = delegate
-        app.run()
-    }
-}
-
 class SamimeAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // 启动 IMK server
@@ -572,3 +562,14 @@ class SamimeAppDelegate: NSObject, NSApplicationDelegate {
         print("[Samime] IMK server started")
     }
 }
+
+// 传统 main 函数（不用 @main，避免和顶层代码冲突）
+func samimeMain() {
+    let app = NSApplication.shared
+    let delegate = SamimeAppDelegate()
+    app.delegate = delegate
+    app.setActivationPolicy(.accessory)
+    app.run()
+}
+
+samimeMain()
