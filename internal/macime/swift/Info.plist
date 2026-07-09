@@ -20,6 +20,8 @@
     <string>SamimeInputMethod_1_Connection</string>
     <key>InputMethodServerControllerClass</key>
     <string>SamimeInputController</string>
+    <key>NSPrincipalClass</key>
+    <string>SamimeInputController</string>
     <key>tsInputMethodCharacterRepertoireKey</key>
     <array>
         <string>Hant</string>
