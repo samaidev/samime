@@ -37,10 +37,10 @@ class GoEngineClient {
             var addr = sockaddr_un()
             addr.sun_family = sa_family_t(AF_UNIX)
             let pathBytes = self.socketPath.utf8CString
-            withUnsafeMutablePointer(to: &addr.sun_path) {
-                $0.withMemoryRebound(to: CChar.self, capacity: pathBytes.count) {
+            withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
+                ptr.withMemoryRebound(to: CChar.self, capacity: pathBytes.count) { cptr in
                     pathBytes.withUnsafeBufferPointer { bp in
-                        strcpy($0, bp.baseAddress!)
+                        strcpy(cptr, bp.baseAddress!)
                     }
                 }
             }
