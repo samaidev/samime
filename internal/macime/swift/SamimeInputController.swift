@@ -550,3 +550,25 @@ class SamimeServer {
 //      sips -z 1024 1024 icon.png --out Samime.iconset/icon_512x512@2x.png
 //      iconutil -c icns Samime.iconset
 //   3. 复制 icon.icns 到 bundle 的 Resources/
+
+// MARK: - main 入口
+// IMK 输入法 app 需要自己的 main，启动 IMK server 并运行 NSApplication
+
+@main
+struct SamimeMain {
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = SamimeAppDelegate()
+        app.delegate = delegate
+        app.run()
+    }
+}
+
+class SamimeAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // 启动 IMK server
+        let server = IMKServer(name: "SamimeInputMethod_1_Connection", bundleIdentifier: Bundle.main.bundleIdentifier)
+        _ = server  // 保持引用
+        print("[Samime] IMK server started")
+    }
+}
