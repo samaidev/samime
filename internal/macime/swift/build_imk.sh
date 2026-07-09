@@ -28,6 +28,7 @@ swiftc \
     -framework Cocoa \
     -framework Foundation \
     -emit-library \
+    -Xlinker -bundle \
     -O \
     SamimeInputController.swift \
     -o "$MACOS_DIR/SamimeInputMethod"
