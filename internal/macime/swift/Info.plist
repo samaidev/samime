@@ -29,5 +29,50 @@
     <string>icon.icns</string>
     <key>LSBackgroundOnly</key>
     <true/>
+    <key>ComponentInputModeDict</key>
+    <dict>
+        <key>tsInputModeListKey</key>
+        <dict>
+            <key>com.samime.inputmethod.pinyin</key>
+            <dict>
+                <key>tsInputModeAlternateMenuIconFileKey</key>
+                <string>icon.icns</string>
+                <key>tsInputModeDefaultStateKey</key>
+                <true/>
+                <key>tsInputModeIsVisibleKey</key>
+                <true/>
+                <key>tsInputModeKeyEquivalentKey</key>
+                <string></string>
+                <key>tsInputModeKeyEquivalentModifiersKey</key>
+                <integer>4608</integer>
+                <key>tsInputModeMenuIconFileKey</key>
+                <string>icon.icns</string>
+                <key>tsInputModePaletteIconFileKey</key>
+                <string>icon.icns</string>
+                <key>tsInputModePrimaryInScriptKey</key>
+                <true/>
+                <key>tsInputModeScriptKey</key>
+                <string>smSimpChinese</string>
+            </dict>
+        </dict>
+        <key>tsInputModePrimaryInScriptKey</key>
+        <string>smSimpChinese</string>
+        <key>tsInputModePaletteIconFileKey</key>
+        <string>icon.icns</string>
+        <key>tsInputModeScriptKey</key>
+        <string>smSimpChinese</string>
+        <key>tsInputModeAlternateMenuIconFileKey</key>
+        <string>icon.icns</string>
+        <key>tsInputModeIsVisibleKey</key>
+        <true/>
+        <key>tsInputModeMenuIconFileKey</key>
+        <string>icon.icns</string>
+        <key>tsInputModeDefaultStateKey</key>
+        <true/>
+        <key>tsInputModeKeyEquivalentKey</key>
+        <string></string>
+        <key>tsInputModeKeyEquivalentModifiersKey</key>
+        <integer>4608</integer>
+    </dict>
 </dict>
 </plist>
