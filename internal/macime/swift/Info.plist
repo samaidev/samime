@@ -59,24 +59,10 @@
                 <string>smSimpChinese</string>
             </dict>
         </dict>
-        <key>tsInputModePrimaryInScriptKey</key>
-        <string>smSimpChinese</string>
-        <key>tsInputModePaletteIconFileKey</key>
-        <string>icon.icns</string>
-        <key>tsInputModeScriptKey</key>
-        <string>smSimpChinese</string>
-        <key>tsInputModeAlternateMenuIconFileKey</key>
-        <string>icon.icns</string>
-        <key>tsInputModeIsVisibleKey</key>
-        <true/>
-        <key>tsInputModeMenuIconFileKey</key>
-        <string>icon.icns</string>
-        <key>tsInputModeDefaultStateKey</key>
-        <true/>
-        <key>tsInputModeKeyEquivalentKey</key>
-        <string></string>
-        <key>tsInputModeKeyEquivalentModifiersKey</key>
-        <integer>4608</integer>
+        <key>tsVisibleInputModeOrderedArrayKey</key>
+        <array>
+            <string>com.samime.inputmethod.pinyin</string>
+        </array>
     </dict>
 </dict>
 </plist>
