@@ -340,7 +340,7 @@ extension CandidateWindow: NSTableViewDataSource, NSTableViewDelegate {
 
 // MARK: - 输入法主控制器
 
-@objc(SamimeInputController) public class SamimeInputController: IMKInputController {
+@objc(SamimeInputController) class SamimeInputController: IMKInputController {
     private let client = GoEngineClient()
     private var preeditBuffer = ""
     private var candidates: [Candidate] = []
