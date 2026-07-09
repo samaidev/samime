@@ -93,11 +93,12 @@ class GoEngineClient {
         }
 
         // 读响应
-        var buf = [UInt8](repeating: 0, count: 65536)
+        let bufCount = 65536
+        var buf = [UInt8](repeating: 0, count: bufCount)
         var total = 0
-        while total < buf.count - 1 {
+        while total < bufCount - 1 {
             let n = buf.withUnsafeMutableBufferPointer { bp -> Int in
-                Darwin.recv(socket, bp.baseAddress! + total, buf.count - 1 - total, 0)
+                Darwin.recv(socket, bp.baseAddress! + total, bufCount - 1 - total, 0)
             }
             if n <= 0 { break }
             total += n
