@@ -28,7 +28,7 @@ echo.
 echo [2/5] 编译 Go 引擎 (samime.exe)...
 set GOOS=windows
 set GOARCH=amd64
-go build -ldflags="-s -w -X main.version=%VERSION%" -o %STAGE%\samime.exe ./cmd/ime-cli
+go build -ldflags="-s -w -H windowsgui -X main.version=%VERSION%" -o %STAGE%\samime.exe ./cmd/ime-cli
 if errorlevel 1 (
     echo [FAIL] Go 编译失败
     exit /b 1

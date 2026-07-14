@@ -12,7 +12,7 @@ echo "[1/4] 编译 Linux amd64"
 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o bin/samime-linux-amd64 ./cmd/ime-cli
 
 echo "[2/4] 编译 Windows amd64"
-GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o bin/samime-windows-amd64.exe ./cmd/ime-cli
+GOOS=windows GOARCH=amd64 go build -ldflags="-s -w -H windowsgui" -o bin/samime-windows-amd64.exe ./cmd/ime-cli
 
 echo "[3/4] 编译 macOS amd64"
 GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o bin/samime-darwin-amd64 ./cmd/ime-cli
